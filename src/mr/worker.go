@@ -116,40 +116,41 @@ func callAssignReduceTask() bool {
 	oname := "mr-out-" + strconv.Itoa(reply.FileNum)
 	ofile, _ := ioutil.TempFile(".", oname)
 
-	for i := 0; i < reply.FileTotalNum; i++ {
-		fileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.FileNum)
+	kva := []KeyValue{}
+	for sss := 0; sss < reply.FileTotalNum; sss++ {
+		fileName := "mr-" + strconv.Itoa(sss) + "-" + strconv.Itoa(reply.FileNum)
 		file, err := os.Open(fileName)
 		if err != nil {
-			log.Fatalf("cannot open %v", fileName)
+			log.Fatalf("cannot open %v\n", fileName)
 			return false
 		}
-		kva := []KeyValue{}
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
+			if err := dec.Decode(&kv); err != nil { //EOF
 				break
 			}
 			kva = append(kva, kv)
 		}
-		for i < len(kva) {
-			j := i + 1
-			for j < len(kva) && kva[j].Key == kva[i].Key {
-				j++
-			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, kva[k].Value)
-			}
-			output := reducef(kva[i].Key, values)
-
-			// this is the correct format for each line of Reduce output.
-			//fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-			ofile.WriteString(kva[i].Key + " " + output + "\n")
-
-			i = j
-		}
 		file.Close()
+	}
+	sort.Sort(ByKey(kva))
+	for i := 0; i < len(kva); {
+		j := i + 1
+		for j < len(kva) && kva[j].Key == kva[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, kva[k].Value)
+		}
+		output := reducef(kva[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		//fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		ofile.WriteString(kva[i].Key + " " + output + "\n")
+
+		i = j
 	}
 
 	nowTS := time.Now().Unix()
@@ -221,7 +222,7 @@ func callAssignMapTask() bool {
 	kva := mapf(filename, string(content))
 	intermediate = append(intermediate, kva...)
 
-	sort.Sort(ByKey(intermediate))
+	//sort.Sort(ByKey(intermediate))
 
 	var intermediateFileSlice []tmpFile
 	for i := 0; i < reply.NReduce; i++ {
