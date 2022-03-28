@@ -100,6 +100,17 @@ func callAssignReduceTask() bool {
 	var args interface{}
 	reply := AssignReduceTaskReply{}
 	rpcSuccess := call("Master.AssignReduceTask", &args, &reply)
+	if !rpcSuccess {
+		return false
+	}
+
+	if reply.FileNum == -2 {
+		return true
+	}
+	if reply.FileNum == -1 {
+		return false
+	}
+
 	return false
 }
 
