@@ -40,12 +40,11 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 func (m *Master) ReportMap(args *CallReportMapArgs, reply *interface{}) error {
 	num := args.FileNum
-	var mutex sync.Mutex
-	mutex.Lock()
+	m.FileStatusMutex.Lock()
 	if m.FilesStatus[num] != fileDone && m.FilesStatus[num] != fileFree {
 		m.FilesStatus[num] = fileDone
 	}
-	mutex.Unlock()
+	m.FileStatusMutex.Unlock()
 	return nil
 }
 func (m *Master) ReportReduce(args *CallReportReduceArgs, reply *interface{}) error {

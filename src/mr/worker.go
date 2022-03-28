@@ -113,7 +113,8 @@ func callAssignReduceTask() bool {
 
 	fmt.Printf("%+v\n", reply)
 	_, reducef := loadPlugin(os.Args[1])
-	oname := "mr-out-" + strconv.Itoa(reply.FileNum)
+	oname := "$mr-out-" + strconv.Itoa(reply.FileNum)
+	oriName := oname[1:]
 	ofile, _ := ioutil.TempFile(".", oname)
 
 	kva := []KeyValue{}
@@ -159,7 +160,7 @@ func callAssignReduceTask() bool {
 		return false
 	}
 
-	os.Rename(ofile.Name(), oname)
+	os.Rename(ofile.Name(), oriName)
 	flag := callReportReduce(reply.FileNum)
 	if !flag {
 		log.Fatalf("fail to report reduce")
@@ -226,11 +227,12 @@ func callAssignMapTask() bool {
 
 	var intermediateFileSlice []tmpFile
 	for i := 0; i < reply.NReduce; i++ {
-		oname := "mr-" + strconv.Itoa(reply.FileNum) + "-" + strconv.Itoa(i)
+		oname := "$mr-" + strconv.Itoa(reply.FileNum) + "-" + strconv.Itoa(i)
+		oriName := oname[1:]
 		ofile, _ := ioutil.TempFile(".", oname) //os.Create(oname)
 		tmp := tmpFile{
 			filePtr:    ofile,
-			originName: oname,
+			originName: oriName,
 			tmpName:    ofile.Name(),
 		}
 		intermediateFileSlice = append(intermediateFileSlice, tmp)
