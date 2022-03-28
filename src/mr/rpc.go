@@ -23,14 +23,18 @@ type ExampleArgs struct {
 type ExampleReply struct {
 	Y int
 }
-
+type CallReportReduceArgs struct {
+	FileNum int
+}
 type CallReportMapArgs struct {
 	FileNum int
 }
 
 type AssignReduceTaskReply struct {
-	NReduce int
-	FileNum int
+	NReduce      int
+	FileNum      int
+	FileTotalNum int
+	FileStatus   fileStatus
 }
 type AssignMapTaskReply struct {
 	NReduce      int

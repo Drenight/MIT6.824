@@ -111,7 +111,69 @@ func callAssignReduceTask() bool {
 		return false
 	}
 
+	fmt.Printf("%+v\n", reply)
+	_, reducef := loadPlugin(os.Args[1])
+	oname := "mr-out-" + strconv.Itoa(reply.FileNum)
+	ofile, _ := ioutil.TempFile(".", oname)
+
+	for i := 0; i < reply.FileTotalNum; i++ {
+		fileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.FileNum)
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", fileName)
+			return false
+		}
+		kva := []KeyValue{}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		for i < len(kva) {
+			j := i + 1
+			for j < len(kva) && kva[j].Key == kva[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, kva[k].Value)
+			}
+			output := reducef(kva[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			//fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+			ofile.WriteString(kva[i].Key + " " + output + "\n")
+
+			i = j
+		}
+		file.Close()
+	}
+
+	nowTS := time.Now().Unix()
+	if int(nowTS)-int(reply.FileStatus) > 8 { //for safe, give up this process
+		ofile.Close()
+		return false
+	}
+
+	os.Rename(ofile.Name(), oname)
+	flag := callReportReduce(reply.FileNum)
+	if !flag {
+		log.Fatalf("fail to report reduce")
+	}
+
+	ofile.Close()
+
 	return false
+}
+
+func callReportReduce(fileNum int) bool {
+	args := CallReportReduceArgs{FileNum: fileNum}
+	var reply interface{}
+	rpcSuccess := call("Master.ReportReduce", &args, &reply)
+	return rpcSuccess
 }
 
 func callReportMap(fileNum int) bool {
@@ -188,6 +250,9 @@ func callAssignMapTask() bool {
 	//successfully run here, which means I need to check time whether to report
 	nowTS := time.Now().Unix()
 	if int(nowTS)-int(reply.FileStatus) > 8 { //for safe, give up this process
+		for i := range intermediateFileSlice {
+			intermediateFileSlice[i].filePtr.Close()
+		}
 		return false
 	}
 
