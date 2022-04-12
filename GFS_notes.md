@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+# 2. Design Overview
+
+>>>>>>> 85a1cb5 (GFS notes added)
 ## 2.4 Single Master
 
 ### interactions for a simple read
@@ -31,3 +36,27 @@ In simple terms, if the chunk size is lower, the chance of **simultaneous** acce
 - successful mutations -> file region is **guaranteed** to be defined and contain the last mutation, by
   1. apply mutas all replicas in same order
   2. chunk version prevent stale record
+<<<<<<< HEAD
+=======
+- cache purge
+- checksum for bad chunkservers
+
+### APP's accommodate
+- practically mutate files by appending > overwriting (more efficient and resilient for failures), checkpoints allow restart incrementally
+
+# 3. System Interactions
+
+## 3.1 Leases and Mutation Order
+- each mutation -> all chunk's replicas
+- the chunk got lease -> the primary, who can pick a serial order for all mutations, other replicas follow this order, request piggybacked in HeartBeat to extend
+- revoke by master, e.g. disable mutations on a file being renamed
+
+### interactions for a simple write
+1. client asks master which chunkserver holds the currenct lease for the chunk and the locations of other replicas
+2. master replies (identity of primary, locations of secondary replicas), client caches it
+3. client pushes data to all relicas(any order), chunkserver store the data in an LRU buffer until the data is used or aged out(LAZY).
+4. after all replicas ack, client sends write req to primary, primary assigns consecutive serial numbers to mutations received from multiple clients, apply mutation to its own local state
+5. primary forwards write req to all secondary
+6. all secondaries reply to primary, they done
+7. primary reply client, any error in any replicas reported, retry from 3->7
+>>>>>>> 85a1cb5 (GFS notes added)
