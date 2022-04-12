@@ -116,3 +116,10 @@ when number of available replicas falls below user's goal
 
 ## 4.4 Garbage Collection
 lazily recalim until regular garbage collection at both file & chunk levels
+
+---
+
+# note from lec3
+- split brain: >1 primarys, processing reqs without knowing each other
+- version number only inc when master assign a new primary
+
