@@ -1,8 +1,13 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 # 2. Design Overview
 
 >>>>>>> 85a1cb5 (GFS notes added)
+=======
+# 2. Design Overview
+
+>>>>>>> 654e2c7 (GFS notes added)
 ## 2.4 Single Master
 
 ### interactions for a simple read
@@ -37,7 +42,10 @@ In simple terms, if the chunk size is lower, the chance of **simultaneous** acce
   1. apply mutas all replicas in same order
   2. chunk version prevent stale record
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> 654e2c7 (GFS notes added)
 - cache purge
 - checksum for bad chunkservers
 
@@ -59,4 +67,7 @@ In simple terms, if the chunk size is lower, the chance of **simultaneous** acce
 5. primary forwards write req to all secondary
 6. all secondaries reply to primary, they done
 7. primary reply client, any error in any replicas reported, retry from 3->7
+<<<<<<< HEAD
 >>>>>>> 85a1cb5 (GFS notes added)
+=======
+>>>>>>> 654e2c7 (GFS notes added)
