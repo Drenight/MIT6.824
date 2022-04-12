@@ -54,3 +54,68 @@ In simple terms, if the chunk size is lower, the chance of **simultaneous** acce
 6. all secondaries reply to primary, they done
 7. primary reply client, any error in any replicas reported, retry from 3->7
 
+<<<<<<< HEAD
+=======
+- large write or straddles chunbk boundary, breaks down into multi operations, may be interleaved by concurrent, consistent but undefined
+
+## 3.2 Data Flow
+  > We decouple the flow of data from the flow of control to use the network efficiently
+  - control flow: client->primary->all secondaries
+  - data flow: pushed linearly along a chain of chunkservers in a pipelined fashion
+
+## 3.3 Atomic Record Appends
+- client specifies only the data, GFS appends it to the file at least once atomically
+- like in 3.1, primary append its replica, tell secondaries write data, exact offset of the primary
+- any replica error, client retry
+- dont guarantee replicas bytewise identical, guarantee written at least once as an atomic unit
+- all replicas at least as long as the end of record, future record at higher offset no matter who's primary
+
+## 3.4 Snapshot
+- To create branch copies of huge data sets / checkpoint the current state
+- **copy-on-write**
+
+### procedure
+1. master revoke leases on the chunks in the files about to snapshot, force contact master
+2. master log ops to disk, apply to its in-memory state by duplicating the metadata for directory tree, point to the same chunks as the source files
+3. when client req write chunk C, master notice reference count for chunk C is greater than one, pick new chunk handle C', ask each chunserver has C to create new chunk C'
+
+Q: The paper mentions reference counts -- what are they?
+
+A: They are part of the implementation of copy-on-write for snapshots.
+When GFS creates a snapshot, it doesn't copy the chunks, but instead
+increases the reference counter of each chunk. This makes creating a
+snapshot inexpensive. If a client writes a chunk and the master
+notices the reference count is greater than one, the master first
+makes a copy so that the client can update the copy (instead of the
+chunk that is part of the snapshot). You can view this as delaying the
+copy until it is absolutely necessary. The hope is that not all chunks
+will be modified and one can avoid making some copies.
+
+- just like lazy in segment tree
+
+# 4. Master Operation
+
+## 4.1 Namespace Management and Locking
+- master operations take long time, use lock not to delay other operations
+- GFS = full pathnames -> metadata
+- master op acquires a set of locks, op involve /d1/d2/.../dn/leaf
+  - read-locks on /d1, /d1/d2, ..., .../dn
+  - either a read/write-lock on /d1/d2/.../dn/leaf
+- prevent a file /home/user/foo from being created while /home/user is being snapshotted to /save/user
+- this locking scheme allows concurrent mutations in same direction
+
+## 4.3 Creation, Re-repication, Rebalancing
+
+### Creation
+chunk creating principle
+1. place new replicas on chunkservers with below-average disk space utilization
+2. limit number of "recent" creations on each chunkserver
+   - predicts imminent heavy write traffic
+3. spread replicas of chunk across racks
+
+### Re-replication
+when number of available replicas falls below user's goal
+
+## 4.4 Garbage Collection
+lazily recalim until regular garbage collection at both file & chunk levels
+>>>>>>> 967612a (GFS notes added)
