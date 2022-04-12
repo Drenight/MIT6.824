@@ -121,5 +121,6 @@ lazily recalim until regular garbage collection at both file & chunk levels
 
 # note from lec3
 - split brain: >1 primarys, processing reqs without knowing each other
+  - usually caused by net partition, master can't talk to primary while primary can talk to clients, so the master must wait until lease expire to designate a new primary
 - version number only inc when master assign a new primary
 
