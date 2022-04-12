@@ -54,8 +54,6 @@ In simple terms, if the chunk size is lower, the chance of **simultaneous** acce
 6. all secondaries reply to primary, they done
 7. primary reply client, any error in any replicas reported, retry from 3->7
 
-<<<<<<< HEAD
-=======
 - large write or straddles chunbk boundary, breaks down into multi operations, may be interleaved by concurrent, consistent but undefined
 
 ## 3.2 Data Flow
@@ -118,4 +116,3 @@ when number of available replicas falls below user's goal
 
 ## 4.4 Garbage Collection
 lazily recalim until regular garbage collection at both file & chunk levels
->>>>>>> 967612a (GFS notes added)
