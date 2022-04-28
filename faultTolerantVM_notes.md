@@ -2,11 +2,7 @@
 enterprise-grade fault-tolerant virtual machines
 - replicating the execution of primary VM via backup VM on another server
 
-<<<<<<< HEAD
 # 1. Introduction
-=======
-# 1 Introduction
->>>>>>> e2572b4 (FTVM)
 common: backup server always available to take over if the primary fails
 - hidden to external clients, no data lost
 - way: ship changes of all state to the backup server
