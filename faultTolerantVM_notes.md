@@ -53,3 +53,28 @@ were to go live at the point of the last log entry before the
 output operation, some non-deterministic event (e.g. timer
 interrupt delivered to the VM) might change its execution
 path before it executed the output operation
+    
+    > If the backup VM has received all the log entries, including the log entry for the output-producing operation, then
+the backup VM will be able to exactly reproduce the state
+of the primary VM at that output point, and so if the primary dies, the backup will correctly reach a state that is consistent with that output
+
+## 2.3 Detecting & Responding to Failure
+VMware FT use UDP heartbeating between servers, regular timer interrupts, halt indicate failure
+- failure could just be network lost between alive servers, so just let backup go live may caused split-brain
+
+Q: 'GO LIVE' means?
+
+A: stop replaying and take over as the primary VM.
+
+Q: How to avoid split-brain?
+
+A:
+> we make use of the shared storage that
+stores the virtual disks of the VM. When either a primary
+or backup VM wants to go live, it executes an atomic **test-and-set** operation on the shared storage.
+
+- Q: What is "an atomic test-and-set operation on the shared storage"?
+- A: http://nil.csail.mit.edu/6.824/2020/papers/vm-ft-faq.txt
+  - it seems both primary and backup will notice the network crash and want to go live? Even though the primary is 'live' actually, it will try test-and-set, fail then suicide.
+
+
