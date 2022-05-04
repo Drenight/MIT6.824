@@ -21,11 +21,6 @@ All input primary VM receives is forwarded via network connection called **loggi
 backups' output dropped by hypervisor
 
 ## 2.1 Deterministic Replay Implementation
-challenges for replicating execution of running VM
-1. capturing all input and non-de to ensure de excution
-2. apply input and non-de to backup
-3. performance
-
 solution: VMware deterministic replay
 - record inputs of a VM and all possible non-de associated with execution in a stream of log entries written to a log file
   - exactly replayed reading this log
@@ -59,6 +54,9 @@ the backup VM will be able to exactly reproduce the state
 of the primary VM at that output point, and so if the primary dies, the backup will correctly reach a state that is consistent with that output
 
 ## 2.3 Detecting & Responding to Failure
+
+How to infer failure happens?
+
 VMware FT use UDP heartbeating between servers, regular timer interrupts, halt indicate failure
 - failure could just be network lost between alive servers, so just let backup go live may caused split-brain
 
@@ -81,19 +79,56 @@ or backup VM wants to go live, it executes an atomic **test-and-set** operation 
 # 3. Practical Implementation of FT
 
 ## 3.1 Starting FT VMs
-- apply to start a backup, and restart a VM after failure
+what is the mechanism for starting a backup VM?
 
-- be useable for a running primary VM in arbitrary state
+- needs?
+  - can be apply to start a backup, and restart a VM after failure
+  - useable for a running primary VM in arbitrary state
 
-FT VMotion
-- clone a VM to a remote host rather than migrating it
-- set up a logging channel, souce->primary, destination-> new backup
+by using **FT VMotion**, modified from VM's Vmotion
+
+- feature?
+  - clone a VM to a remote host
+  - set up a logging channel, souce->primary, destination-> new backup
 
 ## 3.2 Managing the logging channel
+basic running logic of buffer in logging channel?
 > The contents of the primary’s log buffer
 are flushed out to the logging channel as soon as possible,
 and log entries are read into the backup’s log buffer from the
 logging channel as soon as they arrive
 
-## 3.3 Operation on FT VMs
-The only operation that can be done independently on the primary and backup VMs is VMotion, which VMotion them to other hosts.
+## 3.4 Implementation Issues for Disk IOs
+bounce buffer?
+
+Bounce buffer, a cheaper way to avoid non-de page access, comparing with MMU protections on pages
+- a temporary buffer, same size as the memory being accessed by a disk operation
+- a disk read operation is modified to read the specified data to the bounce buffer, and the data is copied to guest memory only as the IO completion is delivered
+- a disk write, data sent first copied to the bounce buffer, and the disk write is modified to write data from the bounce buffer
+
+> Q: How do Section 3.4's bounce buffers help avoid races?
+
+>A: The problem arises when a network packet or requested disk block
+arrives at the primary and needs to be copied into the primary's memory.
+Without FT, the relevant hardware copies the data into memory while
+software is executing. Guest instructions could read that memory
+during the DMA; depending on exact timing, the guest might see or not
+see the DMA'd data (this is the race). It would be bad if the primary
+and backup both did this, but due to slight timing differences one
+read just after the DMA and the other just before. In that case they
+would diverge.
+
+>FT avoids this problem by not copying into guest memory while the
+primary or backup is executing. FT first copies the network packet or
+disk block into a private "bounce buffer" that the primary cannot
+access. When this first copy completes, the FT hypervisor interrupts
+the primary so that it is not executing. FT records the point at which
+it interrupted the primary (as with any interrupt). Then FT copies the
+bounce buffer into the primary's memory, and after that allows the
+primary to continue executing. FT sends the data to the backup on the
+log channel. The backup's FT interrupts the backup at the **same
+instruction as the primary was interrupted** , copies the data into the
+backup's memory while the backup is into executing, and then resumes
+the backup.
+
+why? Cause one more buffer makes sure primary and backup will write/read at the exact same time point, look the bold words upside.
