@@ -99,12 +99,21 @@ and log entries are read into the backup’s log buffer from the
 logging channel as soon as they arrive
 
 ## 3.4 Implementation Issues for Disk IOs
-bounce buffer?
+How to solve non-de in DISKIO? non-de brought by the fact:
+1. disk op can execute in parallel, simultaneous disk op access the same disk location bring non-de
+2. VM's implementation of disk IO uses **DMA**, the simultaneous disk op access the same memory pages bring non-de
 
-Bounce buffer, a cheaper way to avoid non-de page access, comparing with MMU protections on pages
-- a temporary buffer, same size as the memory being accessed by a disk operation
-- a disk read operation is modified to read the specified data to the bounce buffer, and the data is copied to guest memory only as the IO completion is delivered
-- a disk write, data sent first copied to the bounce buffer, and the disk write is modified to write data from the bounce buffer
+upper can be solve by detecting any such IO races, and force such racing disk ops to execute sequentially in the same way both primary and backup.
+
+3. a disk op can race with a memory access by an application(or OS) in a VM
+   - **e.g. if OS in a VM is reading a memory block, at the same time a disk read is occurring to that block**
+
+   1. page protection (expensive to modify MMU)
+      - when VM access the same page, there will be a trap, and VM can be paused until the disk operation completes.
+   2. Bounce Buffer (cheaper)
+      - a temporary buffer, same size as the memory being accessed by a disk operation
+      - a disk read operation is modified to read the specified data to the bounce buffer, and the data is copied to guest memory only as the IO completion is delivered
+      - a disk write, data sent first copied to the bounce buffer, and the disk write is modified to write data from the bounce buffer
 
 > Q: How do Section 3.4's bounce buffers help avoid races?
 
@@ -131,4 +140,4 @@ instruction as the primary was interrupted** , copies the data into the
 backup's memory while the backup is into executing, and then resumes
 the backup.
 
-why? Cause one more buffer makes sure primary and backup will write/read at the exact same time point, look the bold words upside.
+By this way, the exact timing of disk read/write is de
