@@ -169,3 +169,46 @@ interrupt in the log, then there is no need to restart the I/O.
 
 - [ ] how do you know there is a kind of entry indicating completion? Entry in log channels simiar to instructions?
   - just like no jump back instrution?
+
+## 3.5 Implementation Issues for Network IO
+- The biggest change to the networking emulation code for FT is the disabling of the asynchronous network optimizations, which may lead to non-de
+  - code asynchronously updates VM ring buffers with incoming packets has been modified to force the guest to trap to the hypervisor, where it can log the updates and then apply them to the VM
+
+obviously, disable asy brings performance lose, here comes the two optimizations of network:
+
+1. implement clustering optimizations to reduce VM traps and interrupts
+   - one transmit trap, per group of packets
+
+2. reduce the delay for transmitted packets
+   - Since hypervisor must delay all transmitted packets until it gets an ACK from the backup for the appropriate log entries
+   - How? send, receive log entries & ACK can all be done without thread context switch
+     - VMware vSphere hypervisor allows functions to be **registered** with the TCP stack, which can be called from a **deferred-execution** context whenever TCP data is received
+
+# 4 Design Alternatives
+
+## 4.1 Non-shared Disk
+in the case of non-shared disks, the virutal disks are essentially considered part of the internal state of each VM. Therefore, disk writes of the primary do not have to be delayed according to the Output Rule
+- useful in shared storage not accessible to the primary and backups, e.g. :
+  1. expensive
+  2. far away
+- disadvantage
+  1. explicitly sync, re-sync after failure
+  2. no tiebreaker for split-brain, need extra
+
+## 4.2 Executing Disk Reads on the Backup VM
+default, backup never read from virtual disk, instead from logging ch
+  
+alter, read from disk
+  - pros
+    - reduce traffic on logging-ch
+  - cons
+    - slow down backup execution
+    - extra work dealing failure in disk read
+
+> Finally, there is a subtlety if this disk-read alternative is
+used with the shared disk configuration. If the primary VM
+does a read to a particular disk location, followed fairly soon
+by a write to the same disk location, then the disk write
+must be delayed until the backup VM has executed the first
+disk read. This dependence can be detected and handled
+correctly, but adds extra complexity.
