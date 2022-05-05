@@ -141,3 +141,31 @@ backup's memory while the backup is into executing, and then resumes
 the backup.
 
 By this way, the exact timing of disk read/write is de
+
+4. primary disk IO outstanding, failure happens, backup takes over (disk shared)
+
+how to solve?
+
+- no way for newly promoted primary to be sure if the disk IOs were issued to the disk, or completed successfully
+
+no respond or return an error, let the guest try again?
+- guest may not handle it form its local disk, not a good option
+
+re-issue the pending IOs during the go-live process of the backup VM
+
+> Q: Section 3.4 talks about disk I/Os that are outstanding on the
+primary when a failure happens; it says "Instead, we re-issue the
+pending I/Os during the go-live process of the backup VM." Where are
+the pending I/Os located/stored, and how far back does the re-issuing
+need to go?
+
+> A: The paper is talking about disk I/Os for which there is a log entry
+indicating the I/O was started but no entry indicating completion.
+These are the I/O operations that must be re-started on the backup.
+When an I/O completes, the I/O device generates an I/O completion
+interrupt. So, if the I/O completion interrupt is missing in the log,
+then the backup restarts the I/O. If there is an I/O completion
+interrupt in the log, then there is no need to restart the I/O.
+
+- [ ] how do you know there is a kind of entry indicating completion? Entry in log channels simiar to instructions?
+  - just like no jump back instrution?
