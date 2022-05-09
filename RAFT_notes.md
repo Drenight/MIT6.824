@@ -87,19 +87,21 @@ client request
 2. leader issues AppendEntries RPCs in parallel to each of the other servers to replicate the entry
 3. **after entry safely replicated**, leader applies the entry to its state machine, return result to client
 4. if followers crash or run slowly, or network lost, leader retries **indefinitely**, may be even after it responds to client, until all followers store all log entries
+   - [ ] as shown in 5.4 figure8, once chosen be leader again it will try step2, after it crash???
 
 - each log has a term number and log index, which is used to detect inconsistencies between logs, (x<-0, y<-1 can be in the same term cause performd in the same term, and different index)
 
-> committed entry: leader decides it's safe to apply to state machines, durable, will be executed by all available state machines, once the leader replicated it on a majority of servers
+> committed entry: leader decides it's safe to apply to state machines, durable, will be executed by all available state machines, once the leader replicated it on a majority of servers (why only need half? Once committed successfully, later leader will among these majority, those in minority wont get vote because vote comparing in 5.4.1)
 
   - leader keeps track of the highest index it knows to be committed, and will include that index in future AppendEntries RPCs & heartbeat
     - once followers learns a log entry is committed, it apply to its local
+  
 
-if two entries in different logs have the same index and term, then they
-1. store the same command
-   - leader create max one entry with one given log index in one given term
-2. the logs are identical in all preceding entries
-   - consistency check: leader send AERPC with fore index&term in its log, follower refuse if dont match
+**Log Matching Property**: if two entries in different logs have the same index and term, then they
+  1. store the same command
+      - leader create max one entry with one given log index in one given term
+  2. the logs are identical in all preceding entries
+      - consistency check: leader send AERPC with fore index&term in its log, follower refuse if dont match
 
 > To bring a follower’s log into consistency with its own,
 the leader must find the latest log entry where the two
@@ -121,15 +123,39 @@ ones; as a result, different state machines might execute
 different command sequences.
    - the example is exactly what my concern is so far
    - so we need to add restriction on election, by following sth discussed later 
-   - restrict leader contains all entries committed in previous terms
+   
 
 ### 5.4.1 Election restriction
 
-candidate must have contacted at least majority of cluster 
+How to restrict leader contains all entries  **committed** in previous terms?
 
-=> every committed entry present in at least one of those servers (impossible none, the previous leader must contacted one of them, made sure committed)
+- candidate must have contacted at least majority of cluster 
 
-==> if candidate log at least as up2date as any other in majority, it will hold all committed entries
+  - => every committed entry present in at least one of those servers (*1 impossible none, the previous leader must contacted one of them, to made sure that entry committed)
+
+    - ==> if candidate log at least as up2date as any other in majority, it will hold all committed entries
 
 whether to vote YES?
 - candidate include its log info in RV_RPC, voter compare to its own log to see who is more up2date
+
+> up2date: If the logs have last entries with different terms, then
+the log with the later term is more up-to-date. If the logs
+end with the same term, then whichever log is longer is
+more up-to-date
+
+### 5.4.2 Committing entries from previous terms
+
+> If a leader crashes before committing an entry, future leaders will attempt to finish replicating the entry.
+- [ x ] how future lead try means?
+  - if leader crashes just before commit, then the last entry must have been received in majority, and the next leader will have that entry
+
+> However, a leader cannot immediately conclude that an entry from a previous term is **committed** once it is stored on a majority of servers.
+
+   <span style="background-color: #FFFF00">
+   This "committed" focus on the meaning of "durable", not means "being done"
+   </span>
+
+if previous leader crash before commit, later leader with low version may overwrite previous terms entry in cluster, How to deal?
+   > Raft never commits log entries from previous terms by counting replicas
+- dont believe it will be durable because it's on majority's records, if it's from history terms
+
