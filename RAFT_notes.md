@@ -157,5 +157,23 @@ more up-to-date
 
 if previous leader crash before commit, later leader with low version may overwrite previous terms entry in cluster, How to deal?
    > Raft never commits log entries from previous terms by counting replicas
-- dont believe it will be durable because it's on majority's records, if it's from history terms
+- dont believe it will be durable (and apply to your state machine) because it's on majority's records, if it's from history terms
 
+### 5.4.3 Satety argument
+Leader Completeness Property:
+- committed log will be definitely in future leader's log
+- proven by suppose and find contradicitions: leaderT commits a log, leaderU is the first leader who does not have it
+
+State Machine Safety Property
+- popularized by upper property, scope from state machine
+- if a server has applied a log entry at a given
+index to its state machine, no other server will ever apply a
+different log entry for the same index
+
+## 5.5 Follower and candidate crashes
+- simpler than leader crashes
+
+Raft handles these failures by retrying indefinitely, since Raft RPCs are idempotent, be discarded
+
+## 5.6 Timing and availability
+> safety must not depend on timing. System must not produce incorrect results just because some event happens more quickly or slowly than expected
