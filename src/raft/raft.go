@@ -17,14 +17,18 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
+
+var voteExpire = int64(300)
 
 // import "bytes"
 // import "../labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -46,6 +50,12 @@ type ApplyMsg struct {
 //
 // A Go object implementing a single Raft peer.
 //
+
+type LogEntry struct {
+	Term  int64
+	Index int64
+}
+
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -56,7 +66,49 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	hasLeader bool
+	term      int64
+	isLeader  bool
+	logSlice  []LogEntry
+}
 
+func (rf *Raft) bkgRunning() {
+	for { // test for starting leader vote
+		if rf.killed() {
+			break
+		} else { //alive, examine whether receive hb from leader
+			rf.GetMutex()
+			rf.hasLeader = false
+			rf.ReleaseMutex()
+			time.Sleep(time.Millisecond * time.Duration(voteExpire))
+			rf.GetMutex()
+			if rf.hasLeader {
+				rf.ReleaseMutex()
+				continue
+			} else { //start to sendRequestVote
+				args := RequestVoteArgs{}
+				reply := RequestVoteReply{}
+				cnt := 0
+				for i := 0; i < len(rf.peers); i++ {
+					rf.sendRequestVote(i, &args, &reply)
+					if reply.VoteAsLeader {
+						cnt++
+					}
+				}
+				if cnt > len(rf.peers)/2 { //get vote from majority
+					rf.isLeader = true
+				}
+				rf.ReleaseMutex()
+			}
+		}
+	}
+}
+
+func (rf *Raft) GetMutex() {
+	rf.mu.Lock()
+}
+func (rf *Raft) ReleaseMutex() {
+	rf.mu.Unlock()
 }
 
 // return currentTerm and whether this server
@@ -85,7 +137,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -108,15 +159,14 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+}
+type AppendEntriesArgs struct {
 }
 
 //
@@ -125,6 +175,9 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	VoteAsLeader bool
+}
+type AppendEntriesReply struct {
 }
 
 //
@@ -132,6 +185,11 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+}
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.GetMutex()
+	rf.hasLeader = true
+	rf.ReleaseMutex()
 }
 
 //
@@ -167,7 +225,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -189,7 +250,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -238,6 +298,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go rf.bkgRunning()
 
 	return rf
 }
