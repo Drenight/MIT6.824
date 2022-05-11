@@ -135,3 +135,4 @@ lab2需要实现：
 - 现在的思路是，晋升leader后立刻触发一次AppendEntries，不知道有没有用，按道理也就100ms内该发了呀，难道是抢锁一直抢不到？
   - 把非leader 5ms循环check发心跳的逻辑去掉了，改成晋升后发一次，所有AE都100ms，减少了一部分test3的fail，还是有，继续debug
     - 非leader频繁5ms上锁看起来影响到成功率了
+- 221030定位原因了，milliesecond误写成nanosecond，改成后撞见一个没release mutex的if分支，锁了两次，直接把tester卡住
