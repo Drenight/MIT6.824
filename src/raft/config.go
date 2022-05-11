@@ -8,17 +8,21 @@ package raft
 // test with the original before submitting.
 //
 
-import "../labrpc"
-import "log"
-import "sync"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"testing"
+
+	"../labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -233,8 +237,6 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
-
 	cfg.connected[i] = true
 
 	// outgoing ClientEnds
@@ -252,12 +254,11 @@ func (cfg *config) connect(i int) {
 			cfg.net.Enable(endname, true)
 		}
 	}
+	fmt.Printf("!Connect(%d)\n", i)
 }
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
-
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -275,6 +276,7 @@ func (cfg *config) disconnect(i int) {
 			cfg.net.Enable(endname, false)
 		}
 	}
+	fmt.Printf("!Disconnect(%d)\n", i)
 }
 
 func (cfg *config) rpcCount(server int) int {
@@ -309,10 +311,11 @@ func (cfg *config) checkOneLeader() int {
 			if cfg.connected[i] {
 				if term, leader := cfg.rafts[i].GetState(); leader {
 					leaders[term] = append(leaders[term], i)
+					fmt.Printf("Term %v leader is %v\n", term, i)
 				}
 			}
 		}
-
+		//fmt.Printf("we get leaders like %+v\n", leaders)
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
@@ -340,6 +343,7 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
+				//fmt.Printf("xterm: %v, term: %v\n", xterm, term)
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}
@@ -456,6 +460,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				fmt.Printf("cmd1:%+v, cmd:%+v\n", cmd1, cmd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {

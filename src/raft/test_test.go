@@ -14,12 +14,21 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+import "net/http"
+import _ "net/http/pprof"
+import "runtime"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
+
+	go func() {
+		fmt.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+	runtime.SetMutexProfileFraction(1)
+
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
@@ -33,13 +42,18 @@ func TestInitialElection2A(t *testing.T) {
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
 	term1 := cfg.checkTerms()
+	fmt.Println(11)
+
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
 
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
+	fmt.Println(term1)
 	term2 := cfg.checkTerms()
+	fmt.Println(term2)
+
 	if term1 != term2 {
 		fmt.Printf("warning: term changed even though there were no failures")
 	}
@@ -59,14 +73,23 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
+	fmt.Printf("zzz disconnect %v\n", leader1)
+
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+
+	fmt.Println("zzz0.5")
+
 	cfg.checkOneLeader()
+
+	fmt.Println("zzz111")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
+
+	fmt.Println("zzz222")
 
 	// if there's no quorum, no leader should
 	// be elected.
@@ -75,13 +98,19 @@ func TestReElection2A(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
+	fmt.Println("zzz333")
+
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
+	fmt.Println("zzz444")
+
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
+
+	fmt.Println("zzz555")
 
 	cfg.end()
 }
