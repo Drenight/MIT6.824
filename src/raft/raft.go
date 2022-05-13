@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,38 +70,103 @@ type Raft struct {
 	// state a Raft server must maintain.
 	hasLeader bool
 	term      int64
-	isLeader  bool
-	logSlice  []LogEntry
+	votedFor  int
+
+	isLeader bool
+	logSlice []LogEntry
 }
 
-func (rf *Raft) bkgRunning() {
+func (rf *Raft) beLeader() {
+	rf.isLeader = true
+}
+
+func (rf *Raft) bkgRunningCheckVote() {
 	for { // test for starting leader vote
 		if rf.killed() {
-			break
+			fmt.Printf("%v this is dead\n", rf.me)
+			return
+			fmt.Printf("%v this is dead\n", rf.me)
+			time.Sleep(time.Second * 1)
 		} else { //alive, examine whether receive hb from leader
 			rf.GetMutex()
+			if rf.isLeader {
+				rf.ReleaseMutex()
+				continue
+			}
 			rf.hasLeader = false
 			rf.ReleaseMutex()
-			time.Sleep(time.Millisecond * time.Duration(voteExpire))
+			r := rand.New(rand.NewSource(time.Now().UnixNano()))
+			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%137))
 			rf.GetMutex()
 			if rf.hasLeader {
+				//fmt.Println("already has leader")
 				rf.ReleaseMutex()
 				continue
 			} else { //start to sendRequestVote
-				args := RequestVoteArgs{}
-				reply := RequestVoteReply{}
-				cnt := 0
+
+				rf.term++
+				rf.votedFor = -1
+
+				args := RequestVoteArgs{
+					Term: rf.term,
+					Id:   rf.me,
+				}
+				replys := make([]RequestVoteReply, len(rf.peers))
+				cnt := 1
+				var wg sync.WaitGroup
+				wg.Add(len(rf.peers) - 1)
 				for i := 0; i < len(rf.peers); i++ {
-					rf.sendRequestVote(i, &args, &reply)
-					if reply.VoteAsLeader {
+					if i == rf.me {
+						continue
+					}
+					go rf.sendRequestVote(i, &args, &replys[i], &wg)
+				}
+				wg.Wait()
+				for i := 0; i < len(rf.peers); i++ {
+					if replys[i].VoteAsLeader {
 						cnt++
 					}
 				}
+				fmt.Printf("I am %v, get %v votes, total:%v\n", rf.me, cnt, len(rf.peers))
 				if cnt > len(rf.peers)/2 { //get vote from majority
-					rf.isLeader = true
+					rf.beLeader()
 				}
 				rf.ReleaseMutex()
 			}
+		}
+	}
+}
+
+func (rf *Raft) bkgRunningAppendEntries() {
+	for {
+		if rf.killed() {
+			fmt.Printf("%v this is dead\n", rf.me)
+			return
+		} else {
+			rf.GetMutex()
+			if rf.isLeader {
+				/*
+					if !rf.killed() {
+						fmt.Printf("I am leader %v with term %v", rf.me, rf.term)
+					} else {
+						fmt.Println("I am zombie!")
+					}
+				*/
+				args := AppendEntriesArgs{
+					Term: rf.term,
+				}
+				reply := AppendEntriesReply{}
+				var wg sync.WaitGroup
+				wg.Add(len(rf.peers) - 1)
+				for i := 0; i < len(rf.peers); i++ {
+					if i == rf.me {
+						continue
+					}
+					go rf.sendAppendEntries(i, &args, &reply, &wg)
+				}
+				wg.Wait()
+			}
+			rf.ReleaseMutex()
 		}
 	}
 }
@@ -114,10 +181,16 @@ func (rf *Raft) ReleaseMutex() {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	if rf.killed() {
+		fmt.Println("HAAAAA")
+	}
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.GetMutex()
+	term = int(rf.term)
+	isleader = rf.isLeader
+	rf.ReleaseMutex()
 	return term, isleader
 }
 
@@ -165,8 +238,11 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Id   int
+	Term int64
 }
 type AppendEntriesArgs struct {
+	Term int64
 }
 
 //
@@ -185,10 +261,27 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.GetMutex()
+	if rf.term < args.Term && rf.votedFor == -1 {
+		rf.votedFor = args.Id
+		reply.VoteAsLeader = true
+	} else {
+		reply.VoteAsLeader = false
+	}
+	rf.ReleaseMutex()
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.GetMutex()
+	if rf.term > args.Term {
+		rf.ReleaseMutex()
+		return
+	}
+
+	rf.isLeader = false
 	rf.hasLeader = true
+	rf.votedFor = -1
+	//todo, valid check
+	rf.term = args.Term
 	rf.ReleaseMutex()
 }
 
@@ -221,11 +314,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, wg *sync.WaitGroup) bool {
+	defer wg.Done()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, wg *sync.WaitGroup) bool {
+	defer wg.Done()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -268,6 +363,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	fmt.Printf("%v is killed\n", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -293,12 +389,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.votedFor = -1
+
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go rf.bkgRunning()
+	go rf.bkgRunningCheckVote()
+	go rf.bkgRunningAppendEntries()
 
 	return rf
 }

@@ -1,0 +1,9 @@
+Test (2A): initial election ...
+--- FAIL: TestInitialElection2A (4.93s)
+    config.go:330: expected one leader, got none
+Test (2A): election after network failure ...
+--- FAIL: TestReElection2A (5.02s)
+    config.go:330: expected one leader, got none
+FAIL
+exit status 1
+FAIL	_/Users/liuboyao/go/MIT6.824/lab1/src/raft	10.056s
