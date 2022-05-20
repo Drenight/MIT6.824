@@ -383,7 +383,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	defer fmt.Printf("requestVote's %v is ok!", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, ok)
-	if ok {
+	if reply.VoteAsLeader {
 		c <- 1
 	} else {
 		c <- 0
