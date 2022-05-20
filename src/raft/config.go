@@ -237,8 +237,6 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
-
 	cfg.connected[i] = true
 
 	// outgoing ClientEnds
@@ -256,12 +254,11 @@ func (cfg *config) connect(i int) {
 			cfg.net.Enable(endname, true)
 		}
 	}
+	fmt.Printf("!Connect(%d)\n", i)
 }
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
-
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -279,6 +276,7 @@ func (cfg *config) disconnect(i int) {
 			cfg.net.Enable(endname, false)
 		}
 	}
+	fmt.Printf("!Disconnect(%d)\n", i)
 }
 
 func (cfg *config) rpcCount(server int) int {
@@ -317,6 +315,7 @@ func (cfg *config) checkOneLeader() int {
 				}
 			}
 		}
+		//fmt.Printf("we get leaders like %+v\n", leaders)
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {

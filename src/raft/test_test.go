@@ -14,12 +14,21 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+import "net/http"
+import _ "net/http/pprof"
+import "runtime"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
+
+	go func() {
+		fmt.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+	runtime.SetMutexProfileFraction(1)
+
 	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
