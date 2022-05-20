@@ -126,7 +126,8 @@ func (rf *Raft) bkgRunningCheckVote() {
 					Id:   rf.me,
 				}
 				replys := make([]RequestVoteReply, len(rf.peers))
-				cnt := 1
+				cntYes := 1
+				cntNo := 0
 				//var wg sync.WaitGroup
 
 				//start rpc and release lock
@@ -147,21 +148,25 @@ func (rf *Raft) bkgRunningCheckVote() {
 
 				allCnt := 0
 				for true {
-					if cnt > len(rf.peers)/2 { //get vote from majority
+					if cntYes > len(rf.peers)/2 { //get vote from majority
 						rf.GetMutex()
 						rf.beLeader()
 						rf.ReleaseMutex()
 						break
 					} else if allCnt == len(rf.peers)-1 {
 						break
+					} else if cntNo >= len(rf.peers)/2 {
+						break
 					}
 					x := <-c
 					allCnt++
 					if x == 1 {
-						cnt++
+						cntYes++
+					} else {
+						cntNo++
 					}
 				}
-				fmt.Printf("**I am %v, get %v votes, total:%v\n", rf.me, cnt, len(rf.peers))
+				fmt.Printf("**I am %v, get %v votes, and %v noVotes\n", rf.me, cntYes, cntNo)
 
 				//fmt.Printf("After Lock %v waiting", rf.me)
 				//wg.Wait()
@@ -178,6 +183,10 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}
 				*/
 
+				rf.GetMutex()
+				rf.votedFor = -1
+				rf.ReleaseMutex()
+
 				for true {
 					if allCnt == len(rf.peers)-1 {
 						break
@@ -185,6 +194,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 					_ = <-c
 					allCnt++
 				}
+
 				close(c)
 				fmt.Printf("**I am %v, all vote done\n", rf.me)
 				//rf.ReleaseMutex()
