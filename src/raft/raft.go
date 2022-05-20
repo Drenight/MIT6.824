@@ -147,6 +147,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				}
 
 				allCnt := 0
+				startTime := time.Now().UnixNano()
 				for true {
 					if cntYes > len(rf.peers)/2 { //get vote from majority
 						rf.GetMutex()
@@ -157,6 +158,8 @@ func (rf *Raft) bkgRunningCheckVote() {
 						break
 					} else if cntNo >= len(rf.peers)/2 {
 						break
+					} else if time.Now().UnixNano()-startTime > 1000 {
+						break
 					}
 					x := <-c
 					allCnt++
@@ -166,7 +169,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 						cntNo++
 					}
 				}
-				fmt.Printf("**I am %v, get %v votes, and %v noVotes\n", rf.me, cntYes, cntNo)
+				fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v\n", rf.me, cntYes, cntNo, len(rf.peers))
 
 				//fmt.Printf("After Lock %v waiting", rf.me)
 				//wg.Wait()
@@ -391,7 +394,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	fmt.Printf("I am calling to server %v, by %v\n", server, args.Id)
 	//defer wg.Done()
 	defer fmt.Printf("requestVote's %v is ok!", server)
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, reply) //TODO, kick off a new routine with expiration?
 	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, ok)
 	if reply.VoteAsLeader {
 		c <- 1
