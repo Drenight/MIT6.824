@@ -311,7 +311,7 @@ func (cfg *config) checkOneLeader() int {
 			if cfg.connected[i] {
 				if term, leader := cfg.rafts[i].GetState(); leader {
 					leaders[term] = append(leaders[term], i)
-					fmt.Printf("leader is %v\n", i)
+					fmt.Printf("Term %v leader is %v\n", term, i)
 				}
 			}
 		}

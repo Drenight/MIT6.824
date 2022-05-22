@@ -27,7 +27,7 @@ import (
 	"../labrpc"
 )
 
-var voteExpire = int64(300)
+var voteExpire = int64(200)
 
 // import "bytes"
 // import "../labgob"
@@ -78,6 +78,7 @@ type Raft struct {
 
 func (rf *Raft) beLeader() {
 	rf.isLeader = true
+	fmt.Printf("**I, %v am leader of Term %v", rf.me, rf.term)
 }
 
 func (rf *Raft) bkgRunningCheckVote() {
@@ -100,7 +101,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 			rf.ReleaseMutex()
 			fmt.Printf("release lock %v\n", rf.me)
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
-			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%37))
+			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%199))
 
 			//fmt.Printf("Try %v...", rf.me)
 			rf.GetMutex()
@@ -151,14 +152,25 @@ func (rf *Raft) bkgRunningCheckVote() {
 				for true {
 					if cntYes > len(rf.peers)/2 { //get vote from majority
 						rf.GetMutex()
-						rf.beLeader()
+						rf.beLeader() //beleader
+						rf.votedFor = -1
 						rf.ReleaseMutex()
+						time.Sleep(time.Second) //leader rest
 						break
 					} else if allCnt == len(rf.peers)-1 {
+						rf.GetMutex()
+						rf.votedFor = -1
+						rf.ReleaseMutex()
 						break
 					} else if cntNo >= len(rf.peers)/2 {
+						rf.GetMutex()
+						rf.votedFor = -1
+						rf.ReleaseMutex()
 						break
-					} else if time.Now().UnixNano()-startTime > 1000 {
+					} else if time.Now().UnixNano()-startTime > 3000 {
+						rf.GetMutex()
+						rf.votedFor = -1
+						rf.ReleaseMutex()
 						break
 					}
 					x := <-c
@@ -186,10 +198,6 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}
 				*/
 
-				rf.GetMutex()
-				rf.votedFor = -1
-				rf.ReleaseMutex()
-
 				for true {
 					if allCnt == len(rf.peers)-1 {
 						break
@@ -212,26 +220,28 @@ func (rf *Raft) bkgRunningAppendEntries() {
 			fmt.Printf("%v this is dead\n", rf.me)
 			return
 		} else {
-			time.Sleep(time.Millisecond * time.Duration(100))
+			time.Sleep(time.Millisecond * time.Duration(10))
 			rf.GetMutex()
-			args := AppendEntriesArgs{
-				Term: rf.term,
-			}
-			rf.ReleaseMutex()
-
 			if rf.isLeader {
+				args := AppendEntriesArgs{
+					Term: rf.term,
+				}
+				fmt.Printf("$$I, %v, is leader\n", rf.me)
+				rf.ReleaseMutex()
 				reply := AppendEntriesReply{}
-				//var wg sync.WaitGroup
+				var wg sync.WaitGroup
 				//wg.Add(len(rf.peers) - 1)
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
 						continue
 					}
-					go rf.sendAppendEntries(i, &args, &reply)
+					go rf.sendAppendEntries(i, &args, &reply, &wg)
 				}
+				time.Sleep(time.Millisecond * time.Duration(90))
 				//wg.Wait()
+			} else {
+				rf.ReleaseMutex()
 			}
-
 		}
 	}
 }
@@ -395,7 +405,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	//defer wg.Done()
 	defer fmt.Printf("requestVote's %v is ok!", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply) //TODO, kick off a new routine with expiration?
-	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, ok)
+	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, reply.VoteAsLeader)
 	if reply.VoteAsLeader {
 		c <- 1
 	} else {
@@ -406,9 +416,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	//}
 	return ok
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply /*, wg *sync.WaitGroup*/) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, wg *sync.WaitGroup) bool {
 	//defer wg.Done()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	fmt.Printf("$$Leader heartBeat from %v to %v\n", rf.me, server)
 	return ok
 }
 
