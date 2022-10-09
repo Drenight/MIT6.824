@@ -126,6 +126,8 @@ see the DMA'd data (this is the race). It would be bad if the primary
 and backup both did this, but due to slight timing differences one
 read just after the DMA and the other just before. In that case they
 would diverge.
+  - race发生在：网络那边告知disk的一块数据被更新了，然后用户正在读cache里这个块的数据，不确定他会不会读到
+    - primary和backup就这个点的未知可能会diverge
 
 >FT avoids this problem by not copying into guest memory while the
 primary or backup is executing. FT first copies the network packet or
@@ -139,6 +141,10 @@ log channel. The backup's FT interrupts the backup at the **same
 instruction as the primary was interrupted** , copies the data into the
 backup's memory while the backup is into executing, and then resumes
 the backup.
+   - 首先把网络过来的新信息，copy到弹跳栈里
+   - 上面的copy完成后hypervisor中断掉primary的运行，把弹跳栈的内容copy到primary的cache里，然后放primary恢复运行
+   - 上面这个中断的精准时刻被log，backup在相同时间也发生中断替换，所以不会diverge
+   - TODO感觉这样处理的核心在于中断？不需要一个弹跳栈一样可以实现？
 
 By this way, the exact timing of disk read/write is de
 
