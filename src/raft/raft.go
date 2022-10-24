@@ -69,8 +69,8 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	hasLeader bool
-	term      int64
-	votedFor  int
+	term      int64 //term ME kept in logs
+	votedFor  int   //leader voted for in this term, -1 for NULL, self means is candidate
 
 	isLeader bool
 	logSlice []LogEntry
@@ -99,14 +99,14 @@ func (rf *Raft) bkgRunningCheckVote() {
 			}
 			rf.hasLeader = false
 			rf.ReleaseMutex()
-			fmt.Printf("release lock %v\n", rf.me)
+			fmt.Printf("release lock %v, reset my hasLeader!\n", rf.me)
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%199))
 
 			//fmt.Printf("Try %v...", rf.me)
 			rf.GetMutex()
 			//fmt.Printf("Ok %v!", rf.me)
-			if rf.hasLeader || (rf.votedFor != -1 && rf.votedFor != rf.me) {
+			if rf.hasLeader || (rf.votedFor != -1 && rf.votedFor != rf.me) { //has get new leader OR has voted in this term
 				fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
 				rf.ReleaseMutex()
 				fmt.Printf("Release lock %v!\n", rf.me)
@@ -117,7 +117,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//If AppendEntries RPC received from new leader: convert to follower
 				//If election timeout elapses: start new election
 
-				fmt.Printf("I, %v, think there's no leader ", rf.me)
+				fmt.Printf("I, %v, think there's no leader \n", rf.me)
 
 				rf.term++
 				rf.votedFor = rf.me
@@ -126,7 +126,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 					Term: rf.term,
 					Id:   rf.me,
 				}
-				replys := make([]RequestVoteReply, len(rf.peers))
+				//replys := make([]RequestVoteReply, len(rf.peers))
 				cntYes := 1
 				cntNo := 0
 				//var wg sync.WaitGroup
@@ -140,48 +140,89 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//wg.Add(len(rf.peers) - 1)
 				c := make(chan int)
 
+				//allCnt := 0
+				startTime := time.Now().UnixNano()
+
+				fmt.Printf("%v!!!\n", len(rf.peers))
+
 				for i := 0; i < len(rf.peers); i++ {
+					fmt.Printf("%v %v!\n", i, rf.me)
 					if i == rf.me {
 						continue
 					}
-					go rf.sendRequestVote(i, &args, &replys[i], c /*, &wg*/)
+					tmp := i //classic bug, using iteration args with multithread
+					go func(i int) {
+						fmt.Printf("%vxxx\n", i)
+						reply := RequestVoteReply{}
+						rf.sendRequestVote(i, &args, &reply, c /*, &wg*/)
+						if reply.VoteAsLeader {
+							rf.GetMutex()
+							cntYes += 1
+							rf.ReleaseMutex()
+						} else {
+							rf.GetMutex()
+							cntNo += 1
+							rf.ReleaseMutex()
+						}
+					}(tmp)
 				}
 
-				allCnt := 0
-				startTime := time.Now().UnixNano()
 				for true {
-					if cntYes > len(rf.peers)/2 { //get vote from majority
-						rf.GetMutex()
-						rf.beLeader() //beleader
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						time.Sleep(time.Second) //leader rest
-						break
-					} else if allCnt == len(rf.peers)-1 {
-						rf.GetMutex()
-						rf.votedFor = -1
+					time.Sleep(time.Millisecond * time.Duration(10))
+					rf.GetMutex()
+					if cntYes > len(rf.peers)/2 { //odd
+						rf.beLeader()
+						rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
 						rf.ReleaseMutex()
 						break
-					} else if cntNo >= len(rf.peers)/2 {
-						rf.GetMutex()
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						break
-					} else if time.Now().UnixNano()-startTime > 3000 {
-						rf.GetMutex()
+					}
+					if cntNo > len(rf.peers)/2 {
 						rf.votedFor = -1
 						rf.ReleaseMutex()
 						break
 					}
-					x := <-c
-					allCnt++
-					if x == 1 {
-						cntYes++
-					} else {
-						cntNo++
+					if time.Now().UnixNano()-startTime > 3000 {
+						rf.votedFor = -1
+						rf.ReleaseMutex()
 					}
 				}
-				fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v\n", rf.me, cntYes, cntNo, len(rf.peers))
+				fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
+
+				/*
+					for true {
+						if cntYes > len(rf.peers)/2 { //get vote from majority
+							rf.GetMutex()
+							rf.beLeader() //beleader
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							time.Sleep(time.Second) //leader rest
+							break
+						} else if allCnt == len(rf.peers)-1 {
+							rf.GetMutex()
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							break
+						} else if cntNo >= len(rf.peers)/2 {
+							rf.GetMutex()
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							break
+						} else if time.Now().UnixNano()-startTime > 3000 {
+							rf.GetMutex()
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							break
+						}
+						x := <-c	//怀疑半年前这样写，会阻塞住一直不触发3000ms退出，尝试重写 221024，尝试成功，显著降低失败率，我好牛逼
+						allCnt++
+						if x == 1 {
+							cntYes++
+						} else {
+							cntNo++
+						}
+					}
+					fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v\n", rf.me, cntYes, cntNo, len(rf.peers))
+				*/
 
 				//fmt.Printf("After Lock %v waiting", rf.me)
 				//wg.Wait()
@@ -198,13 +239,15 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}
 				*/
 
-				for true {
-					if allCnt == len(rf.peers)-1 {
-						break
+				/*
+					for true {
+						if allCnt == len(rf.peers)-1 {
+							break
+						}
+						_ = <-c
+						allCnt++
 					}
-					_ = <-c
-					allCnt++
-				}
+				*/
 
 				close(c)
 				fmt.Printf("**I am %v, all vote done\n", rf.me)
@@ -399,7 +442,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
-//
+//server int, args *RequestVoteArgs, reply *RequestVoteReply
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, c chan int /*, wg *sync.WaitGroup*/) bool {
 	fmt.Printf("I am calling to server %v, by %v\n", server, args.Id)
 	//defer wg.Done()
@@ -407,9 +450,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply) //TODO, kick off a new routine with expiration?
 	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, reply.VoteAsLeader)
 	if reply.VoteAsLeader {
-		c <- 1
+		return true //c <- 1
 	} else {
-		c <- 0
+		return false //c <- 0
 	}
 	//if !ok {
 	//	fmt.Printf("not ok call to %v\n", server)
