@@ -150,6 +150,7 @@ more up-to-date
   - if leader crashes just before commit, then the last entry must have been received in majority, and the next leader will have that entry
 
 > However, a leader cannot immediately conclude that an entry from a previous term is **committed** once it is stored on a majority of servers.
+   - Paper Figure 8, old term may be covered 
 
    <span style="background-color: #FFFF00">
    This "committed" focus on the meaning of "durable", not means "being done"
@@ -158,6 +159,7 @@ more up-to-date
 if previous leader crash before commit, later leader with low version may overwrite previous terms entry in cluster, How to deal?
    > Raft never commits log entries from previous terms by counting replicas
 - dont believe it will be durable (and apply to your state machine) because it's on majority's records, if it's from history terms
+  - Figure 8, don't commit(apply to state machine) old term's record.
 
 ### 5.4.3 Satety argument
 Leader Completeness Property:
