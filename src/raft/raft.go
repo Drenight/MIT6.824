@@ -92,14 +92,14 @@ func (rf *Raft) bkgRunningCheckVote() {
 			//fmt.Printf("lock %v!", rf.me)
 			if rf.isLeader {
 				rf.ReleaseMutex()
-				fmt.Printf("release lock %v as leader\n", rf.me)
+				//fmt.Printf("release lock %v as leader\n", rf.me)
 				time.Sleep(time.Second)
 				//fmt.Printf("I, %v, is a leader\n", rf.me)
 				continue
 			}
 			rf.hasLeader = false
 			rf.ReleaseMutex()
-			fmt.Printf("release lock %v, reset my hasLeader!\n", rf.me)
+			//fmt.Printf("release lock %v, reset my hasLeader!\n", rf.me)
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%199))
 
@@ -107,9 +107,9 @@ func (rf *Raft) bkgRunningCheckVote() {
 			rf.GetMutex()
 			//fmt.Printf("Ok %v!", rf.me)
 			if rf.hasLeader || (rf.votedFor != -1 && rf.votedFor != rf.me) { //has get new leader OR has voted in this term
-				fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
+				//fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
 				rf.ReleaseMutex()
-				fmt.Printf("Release lock %v!\n", rf.me)
+				//fmt.Printf("Release lock %v!\n", rf.me)
 				continue
 			} else { //be candidate, start to sendRequestVote
 
@@ -117,7 +117,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//If AppendEntries RPC received from new leader: convert to follower
 				//If election timeout elapses: start new election
 
-				fmt.Printf("I, %v, think there's no leader \n", rf.me)
+				//fmt.Printf("I, %v, think there's no leader \n", rf.me)
 
 				rf.term++
 				rf.votedFor = rf.me
@@ -135,7 +135,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//expect AERPC lock modify all, which is more prior
 				//args is locked value, wont change result of RPCs
 				rf.ReleaseMutex()
-				fmt.Printf("Release lock %v!\n", rf.me)
+				//fmt.Printf("Release lock %v!\n", rf.me)
 
 				//wg.Add(len(rf.peers) - 1)
 				c := make(chan int)
@@ -143,16 +143,12 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//allCnt := 0
 				startTime := time.Now().UnixNano()
 
-				fmt.Printf("%v!!!\n", len(rf.peers))
-
 				for i := 0; i < len(rf.peers); i++ {
-					fmt.Printf("%v %v!\n", i, rf.me)
 					if i == rf.me {
 						continue
 					}
 					tmp := i //classic bug, using iteration args with multithread
 					go func(i int) {
-						fmt.Printf("%vxxx\n", i)
 						reply := RequestVoteReply{}
 						rf.sendRequestVote(i, &args, &reply, c /*, &wg*/)
 						if reply.VoteAsLeader {
@@ -170,6 +166,10 @@ func (rf *Raft) bkgRunningCheckVote() {
 				for true {
 					time.Sleep(time.Millisecond * time.Duration(10))
 					rf.GetMutex()
+					if rf.hasLeader == true {
+						rf.ReleaseMutex()
+						break
+					}
 					if cntYes > len(rf.peers)/2 { //odd
 						rf.beLeader()
 						rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
@@ -186,7 +186,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 						rf.ReleaseMutex()
 					}
 				}
-				fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
+				//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
 
 				/*
 					for true {
@@ -250,7 +250,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				*/
 
 				close(c)
-				fmt.Printf("**I am %v, all vote done\n", rf.me)
+				//fmt.Printf("**I am %v, all vote done\n", rf.me)
 				//rf.ReleaseMutex()
 			}
 		}
@@ -267,18 +267,20 @@ func (rf *Raft) bkgRunningAppendEntries() {
 			rf.GetMutex()
 			if rf.isLeader {
 				args := AppendEntriesArgs{
-					Term: rf.term,
+					LeaderID:   int64(rf.me),
+					LeaderTerm: rf.term,
+					//PrevLogTerm:
 				}
-				fmt.Printf("$$I, %v, is leader\n", rf.me)
+				//fmt.Printf("$$I, %v, is leader\n", rf.me)
 				rf.ReleaseMutex()
 				reply := AppendEntriesReply{}
-				var wg sync.WaitGroup
+				//var wg sync.WaitGroup
 				//wg.Add(len(rf.peers) - 1)
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
 						continue
 					}
-					go rf.sendAppendEntries(i, &args, &reply, &wg)
+					go rf.sendAppendEntries(i, &args, &reply)
 				}
 				time.Sleep(time.Millisecond * time.Duration(90))
 				//wg.Wait()
@@ -362,7 +364,12 @@ type RequestVoteArgs struct {
 	Term int64
 }
 type AppendEntriesArgs struct {
-	Term int64
+	LeaderID     int64
+	LeaderTerm   int64
+	PrevLogTerm  int64
+	PrevLogIndex int64
+	Entries      []LogEntry
+	LeaderCommit int64
 }
 
 //
@@ -374,6 +381,8 @@ type RequestVoteReply struct {
 	VoteAsLeader bool
 }
 type AppendEntriesReply struct {
+	FollowerTerm int64
+	Success      int64 //follower's last log is prev
 }
 
 //
@@ -385,23 +394,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.GetMutex() //BUG DEAD LOCK?
 	//fmt.Printf("I am called by %v, LOCKED %v", args.Id, rf.me)
 
-	fmt.Printf("I am %+v, args is %+v\n", rf, args)
+	//fmt.Printf("%+v", rf.mu) //我猜是你小子报的race，还真是！
+	//fmt.Printf("I am %+v, args is %+v\n", rf, args)
 
 	if rf.term < args.Term && (rf.votedFor == -1 || rf.votedFor == args.Id) { //todo,split vote?
 		rf.votedFor = args.Id
 		reply.VoteAsLeader = true
-		fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)
+		//fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)
 	} else {
 		reply.VoteAsLeader = false
-		fmt.Printf("I, %v, vote %v NO\n", rf.me, args.Id)
+		//fmt.Printf("I, %v, vote %v NO\n", rf.me, args.Id)
 	}
 
 	rf.ReleaseMutex()
-	fmt.Printf("I am called by %v, going to RELEASE %v\n", args.Id, rf.me)
+	//fmt.Printf("I am called by %v, going to RELEASE %v\n", args.Id, rf.me)
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.GetMutex()
-	if rf.term > args.Term {
+	if rf.term > args.LeaderTerm {
 		rf.ReleaseMutex()
 		return
 	}
@@ -410,7 +420,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.hasLeader = true
 	rf.votedFor = -1
 	//todo, valid check
-	rf.term = args.Term
+	rf.term = args.LeaderTerm
 	rf.ReleaseMutex()
 }
 
@@ -444,11 +454,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //server int, args *RequestVoteArgs, reply *RequestVoteReply
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, c chan int /*, wg *sync.WaitGroup*/) bool {
-	fmt.Printf("I am calling to server %v, by %v\n", server, args.Id)
+	//fmt.Printf("I am calling to server %v, by %v\n", server, args.Id)
 	//defer wg.Done()
-	defer fmt.Printf("requestVote's %v is ok!", server)
+	//defer fmt.Printf("requestVote's %v is ok!", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply) //TODO, kick off a new routine with expiration?
-	fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, reply.VoteAsLeader)
+	//fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, reply.VoteAsLeader)
 	if reply.VoteAsLeader {
 		return true //c <- 1
 	} else {
@@ -459,10 +469,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	//}
 	return ok
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, wg *sync.WaitGroup) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	//defer wg.Done()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	fmt.Printf("$$Leader heartBeat from %v to %v\n", rf.me, server)
+	//fmt.Printf("$$Leader heartBeat from %v to %v\n", rf.me, server)
 	return ok
 }
 

@@ -1,3 +1,56 @@
+# MIT Syllabus
+MR,GFS,FTVM的共同点？
+- MR replicate计算，但依赖单点master
+- GFS replicate 数据，依赖单点master选择primary
+  - primary告知其他replica绝对位置
+- FTVM replicate 服务，依赖外部test-and-set选择primary
+- RAFT是没有单点故障的
+
+脑裂怎么产生的，为什么会造成damage？
+- 网络隔断partition，各自认为无leader
+- 集群diverge，两次read数据不一致
+
+基于raft的k/v系统时序？
+1. client请求leader的k/v层
+2. leader把req加进自己的log
+3. leader发appendEntries，让followers把req加进自己的log
+4. followers加进了log的话，就汇报给leader成功，leader统计过半
+5. 过半followers汇报log写入的话，leader认为这条log是"commited"的
+   - > committed means won't be forgotten even if failures
+6. leader执行这条req，汇报给client，操作完成
+7. leader在心跳里夹带"执行"命令，告诉follower把log里这个操作执行掉
+8. follower执行
+
+为什么是"基于log一致"？
+- log的顺序唯一确定了，req的执行顺序
+- 保证所有replica像一致的状态机state machine
+
+结合下DDIA，这里保证什么样的一致性？
+- 复习：DDIA讲了：
+  - 最终一致
+    - 纯异步系统，lag最终会catch up
+    - 异步replication**基本**一致性
+  - read-after-write一致
+    - 写完立刻读，能读到新数据
+    - 让用户安心
+    - 自己的读去leader/Track更新1min内读leader/客户最新ts筛选follower
+  - Monotonic Reads一致
+    - 读的数据版本不会回退
+    - 读同一个follower，故障转发
+  - Consistent Prefix一致
+    - 读一组相关的操作，不会乱序
+    - Track相关操作的前后顺序
+- 首先最终一致肯定是有的，其次因为整个集群基于log，前缀一致读也是有的
+- 另外俩都不保证
+
+term和leader的映射关系？
+- >new leader -> new term
+- >a term has at most one leader; might have no leader
+  - 一个term分票了，下一轮candidate又会increment term
+
+follower roll-back是什么机制？
+- each live follower deletes **tail of log** that **differs from leader**, copy leader's 'correct memory'
+
 # 1 Introduction
 Consus algorithms: allow a collection of machines to work as a coherent group that can survive the failures of some of its members
 
