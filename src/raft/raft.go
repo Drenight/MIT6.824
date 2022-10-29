@@ -54,6 +54,7 @@ type ApplyMsg struct {
 //
 
 type LogEntry struct {
+	Cmd   interface{}
 	Term  int64
 	Index int64
 }
@@ -72,19 +73,28 @@ type Raft struct {
 	term      int64 //term ME kept in logs
 	votedFor  int   //leader voted for in this term, -1 for NULL, self means is candidate
 
-	isLeader bool
-	logSlice []LogEntry
+	isLeader      bool
+	logs          []LogEntry
+	commitIndex   int64
+	lastApplied   int64
+	nextIndexMap  map[int]int64
+	matchIndexMap map[int]int64
 }
 
 func (rf *Raft) beLeader() {
 	rf.isLeader = true
-	fmt.Printf("**I, %v am leader of Term %v", rf.me, rf.term)
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndexMap[i] = 0
+		rf.matchIndexMap[i] = 0
+	}
+	fmt.Printf("**I, %v become leader of Term %v\n", rf.me, rf.term)
 }
 
 func (rf *Raft) bkgRunningCheckVote() {
 	for { // test for starting leader vote
 		if rf.killed() {
-			fmt.Printf("%v this is dead\n", rf.me)
+			//fmt.Printf("%v this is dead\n", rf.me)
+			//time.Sleep(time.Millisecond * time.Duration(5))
 			return
 		} else { //alive, examine whether receive hb from leader
 			//fmt.Printf("try lock %v ", rf.me)
@@ -101,7 +111,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 			rf.ReleaseMutex()
 			//fmt.Printf("release lock %v, reset my hasLeader!\n", rf.me)
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
-			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%199))
+			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%99))
 
 			//fmt.Printf("Try %v...", rf.me)
 			rf.GetMutex()
@@ -117,7 +127,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//If AppendEntries RPC received from new leader: convert to follower
 				//If election timeout elapses: start new election
 
-				//fmt.Printf("I, %v, think there's no leader \n", rf.me)
+				fmt.Printf("I, %v, think there's no leader \n", rf.me)
 
 				rf.term++
 				rf.votedFor = rf.me
@@ -138,10 +148,9 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//fmt.Printf("Release lock %v!\n", rf.me)
 
 				//wg.Add(len(rf.peers) - 1)
-				c := make(chan int)
 
 				//allCnt := 0
-				startTime := time.Now().UnixNano()
+				//startTime := time.Now().UnixNano()
 
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
@@ -150,42 +159,58 @@ func (rf *Raft) bkgRunningCheckVote() {
 					tmp := i //classic bug, using iteration args with multithread
 					go func(i int) {
 						reply := RequestVoteReply{}
-						rf.sendRequestVote(i, &args, &reply, c /*, &wg*/)
+						st := time.Now().UnixMilli()
+						rf.sendRequestVote(i, &args, &reply /*, &wg*/)
+						rf.GetMutex()
+						fmt.Printf("%+v consume%v vote req done, now I votedfor%v get %+v, cntYes%v, half%v\n", rf.me, time.Now().UnixMilli()-st, rf.votedFor, reply, cntYes, len(rf.peers)/2)
+						defer rf.ReleaseMutex()
+						if rf.votedFor != rf.me {
+							return
+						}
+						if reply.Term > rf.term {
+							rf.term = reply.Term
+							rf.votedFor = -1
+							return
+						}
 						if reply.VoteAsLeader {
-							rf.GetMutex()
 							cntYes += 1
-							rf.ReleaseMutex()
-						} else {
-							rf.GetMutex()
+							if cntYes > len(rf.peers)/2 {
+								rf.beLeader()
+								rf.doHeartBeat()
+							}
+						} else if !reply.VoteAsLeader {
 							cntNo += 1
-							rf.ReleaseMutex()
 						}
 					}(tmp)
 				}
-
-				for true {
-					time.Sleep(time.Millisecond * time.Duration(10))
-					rf.GetMutex()
-					if rf.hasLeader == true {
-						rf.ReleaseMutex()
-						break
+				/*
+					for {
+						time.Sleep(time.Millisecond * time.Duration(5))
+						rf.GetMutex()
+						if rf.hasLeader {
+							rf.ReleaseMutex()
+							break
+						}
+						if cntYes > len(rf.peers)/2 { //odd
+							rf.beLeader()
+							rf.doHeartBeat()
+							//rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
+							rf.ReleaseMutex()
+							break
+						}
+						if cntNo > len(rf.peers)/2 {
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							break
+						}
+						if time.Now().UnixNano()-startTime > 1000 {
+							//fmt.Printf("TLE %v\n", rf.me)
+							rf.votedFor = -1
+							rf.ReleaseMutex()
+							//break
+						}
 					}
-					if cntYes > len(rf.peers)/2 { //odd
-						rf.beLeader()
-						rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
-						rf.ReleaseMutex()
-						break
-					}
-					if cntNo > len(rf.peers)/2 {
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						break
-					}
-					if time.Now().UnixNano()-startTime > 3000 {
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-					}
-				}
+				*/
 				//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
 
 				/*
@@ -249,41 +274,212 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}
 				*/
 
-				close(c)
 				//fmt.Printf("**I am %v, all vote done\n", rf.me)
 				//rf.ReleaseMutex()
 			}
 		}
 	}
 }
+func Min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+//under mutex
+func (rf *Raft) doHeartBeat() {
+	if !rf.isLeader {
+		return
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		args := AppendEntriesArgs{IsHeartBeat: true, LeaderID: int64(rf.me), LeaderTerm: rf.term}
+		reply := AppendEntriesReply{}
+		go func(to int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+			rf.sendAppendEntries(to, args, reply)
+		}(i, &args, &reply)
+	}
+}
 
 func (rf *Raft) bkgRunningAppendEntries() {
 	for {
 		if rf.killed() {
-			fmt.Printf("%v this is dead\n", rf.me)
+			//fmt.Printf("%v this is dead\n", rf.me)
+			//time.Sleep(time.Millisecond * time.Duration(5))
 			return
 		} else {
-			time.Sleep(time.Millisecond * time.Duration(10))
+			time.Sleep(time.Millisecond * time.Duration(100))
+			//ts := time.Now().UnixNano()
+			//fmt.Printf("$$I, %v, is leader of term%v, Try mutex for my AE!\n", rf.me, rf.term)
 			rf.GetMutex()
+			//fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
 			if rf.isLeader {
-				args := AppendEntriesArgs{
-					LeaderID:   int64(rf.me),
-					LeaderTerm: rf.term,
-					//PrevLogTerm:
-				}
-				//fmt.Printf("$$I, %v, is leader\n", rf.me)
+				//rf.ReleaseMutex()
+				//fmt.Printf("%+v\n", rf.logs)
+				rf.doHeartBeat()
 				rf.ReleaseMutex()
-				reply := AppendEntriesReply{}
+				//fmt.Printf("$$I, %v, is leader of term%v, start my AE!\n", rf.me, rf.term)
+
 				//var wg sync.WaitGroup
 				//wg.Add(len(rf.peers) - 1)
-				for i := 0; i < len(rf.peers); i++ {
+				//cntDone := 0
+				//commitIndexNow := -1
+
+				//rf.GetMutex()
+				//fmt.Printf("$$I, %v, is leader of term%v, Mutex for AE args get!\n", rf.me, rf.term)
+
+				/*
+					var argsList []AppendEntriesArgs
+					var replyList []AppendEntriesReply
+
+					for i := 0; i < len(rf.peers); i++ {
+						if i == rf.me {
+							argsList = append(argsList, AppendEntriesArgs{})
+							replyList = append(replyList, AppendEntriesReply{})
+							continue
+						}
+
+							var entries []LogEntry
+
+							//for j := rf.nextIndexMap[i]; j < int64(len(rf.logs)); j++ {
+							//	entries = append(entries, rf.logs[j])
+							//}
+							entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
+							//fmt.Printf("%+v\n", entries)
+							prevLogIndex := int64(-1)
+							prevLogTerm := int64(-1)
+							if len(rf.logs) > 1 {
+								prevLogIndex = rf.logs[len(rf.logs)-2].Index
+								prevLogTerm = rf.logs[len(rf.logs)-2].Term
+							}
+
+							args := AppendEntriesArgs{
+								LeaderID:   int64(rf.me),
+								LeaderTerm: rf.term,
+								//PrevLogTerm:	//有prev，清掉follower后面；没prev，减leader的map；记得是无限回退找lca的
+								PrevLogIndex: prevLogIndex,
+								PrevLogTerm:  prevLogTerm,
+								Entries:      entries,
+								LeaderCommit: rf.commitIndex,
+							}
+
+
+						//测试args
+						args := AppendEntriesArgs{LeaderID: int64(rf.me), LeaderTerm: rf.term}
+						reply := AppendEntriesReply{}
+						argsList = append(argsList, args)
+						replyList = append(replyList, reply)
+					}
+				*/
+				//rf.ReleaseMutex()
+
+				//fmt.Printf("$$I, %v, is leader of term%v, AE args ready!\n", rf.me, rf.term)
+
+				/*
+					for i := 0; i < len(rf.peers); i++ {
+						if i == rf.me {
+							continue
+						}
+				*/
+				/*
 					if i == rf.me {
 						continue
 					}
-					go rf.sendAppendEntries(i, &args, &reply)
-				}
-				time.Sleep(time.Millisecond * time.Duration(90))
+
+					rf.GetMutex()
+					var entries []LogEntry
+
+						for j := rf.nextIndexMap[i]; j < int64(len(rf.logs)); j++ {
+							entries = append(entries, rf.logs[j])
+						}
+
+					//fmt.Printf("%+v\n", entries)
+					prevLogIndex := int64(-1)
+					prevLogTerm := int64(-1)
+					if len(rf.logs) > 1 {
+						prevLogIndex = rf.logs[len(rf.logs)-2].Index
+						prevLogTerm = rf.logs[len(rf.logs)-2].Term
+					}
+
+					args := AppendEntriesArgs{
+						LeaderID:   int64(rf.me),
+						LeaderTerm: rf.term,
+						//PrevLogTerm:	//有prev，清掉follower后面；没prev，减leader的map；记得是无限回退找lca的
+						PrevLogIndex: prevLogIndex,
+						PrevLogTerm:  prevLogTerm,
+						Entries:      entries,
+						LeaderCommit: rf.commitIndex,
+					}
+					reply := AppendEntriesReply{}
+
+					rf.ReleaseMutex()
+				*/
+				//go rf.sendAppendEntries(i, &args, &reply)
+				/*
+					tmp := i
+					go func(i int, args AppendEntriesArgs, reply AppendEntriesReply) { //while true here
+						rf.sendAppendEntries(i, &args, &reply)
+						//fmt.Printf("%+v\n", args)
+						//fmt.Printf("%+v\n", len(args.Entries))
+				*/
+				/*
+					if reply.Success == 1 {
+						rf.GetMutex()
+						if commitIndexNow == -1 {
+							if len(args.Entries) != 0 {
+								fmt.Printf("www\n")
+								commitIndexNow = int(args.Entries[0].Index)
+							}
+						} else {
+							commitIndexNow = Min(commitIndexNow, int(args.Entries[0].Index))
+						}
+						if len(args.Entries) != 0 {
+							rf.matchIndexMap[i] = args.Entries[len(args.Entries)-1].Index
+							rf.nextIndexMap[i] = rf.matchIndexMap[i] + 1
+						}
+						cntDone += 1
+						rf.ReleaseMutex()
+					} else {
+						fmt.Printf("?,I %v got rej from %v\n", rf.me, i)
+						rf.GetMutex()
+						cntDone += 1
+						rf.ReleaseMutex()
+					}
+				*/
+				//}(tmp, AppendEntriesArgs{LeaderID: int64(rf.me), LeaderTerm: rf.term}, AppendEntriesReply{} /*argsList[i], replyList[i]*/)
+				//}
+				//st := time.Now().UnixMilli()
+				//fmt.Printf("I %v, start waiting for AE reply\n", rf.me)
+
+				/*
+					for {
+						//break
+
+							if time.Now().UnixMilli()-st > 1000 {
+								break
+							}
+
+						time.Sleep(time.Millisecond * time.Duration(10))
+						rf.GetMutex()
+						//fmt.Printf("cntDone is %+v\n", cntDone)
+						if cntDone == len(rf.peers)-1 { //sub me
+							//fmt.Printf("I have commit Index Now %+v\n", commitIndexNow)
+							rf.commitIndex = int64(Min(int(rf.commitIndex), commitIndexNow))
+							//rf.ReleaseMutex()
+							//break
+						}
+						rf.ReleaseMutex()
+					}
+				*/
+
+				//fmt.Printf("I %v collect %v AE reply consuming %v\n", rf.me, cntDone, time.Now().UnixMilli()-st)
+				//rf.ReleaseMutex()
+				//time.Sleep(time.Millisecond * time.Duration(90))
 				//wg.Wait()
+				//time.Sleep(time.Millisecond * time.Duration(95))
 			} else {
 				rf.ReleaseMutex()
 			}
@@ -364,10 +560,11 @@ type RequestVoteArgs struct {
 	Term int64
 }
 type AppendEntriesArgs struct {
+	IsHeartBeat  bool
 	LeaderID     int64
 	LeaderTerm   int64
-	PrevLogTerm  int64
 	PrevLogIndex int64
+	PrevLogTerm  int64
 	Entries      []LogEntry
 	LeaderCommit int64
 }
@@ -379,6 +576,7 @@ type AppendEntriesArgs struct {
 type RequestVoteReply struct {
 	// Your data here (2A).
 	VoteAsLeader bool
+	Term         int64
 }
 type AppendEntriesReply struct {
 	FollowerTerm int64
@@ -394,16 +592,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.GetMutex() //BUG DEAD LOCK?
 	//fmt.Printf("I am called by %v, LOCKED %v", args.Id, rf.me)
 
-	//fmt.Printf("%+v", rf.mu) //我猜是你小子报的race，还真是！
-	//fmt.Printf("I am %+v, args is %+v\n", rf, args)
+	fmt.Printf("I am %v, args is %+v\n", rf.me, args)
 
-	if rf.term < args.Term && (rf.votedFor == -1 || rf.votedFor == args.Id) { //todo,split vote?
+	if rf.term < args.Term {
+		rf.term = args.Term
+		rf.votedFor = -1
+	}
+
+	if rf.votedFor == -1 || rf.votedFor == args.Id { //todo,split vote?
 		rf.votedFor = args.Id
+		rf.term = args.Term
 		reply.VoteAsLeader = true
-		//fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)
+		reply.Term = rf.term
+		fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)
 	} else {
 		reply.VoteAsLeader = false
-		//fmt.Printf("I, %v, vote %v NO\n", rf.me, args.Id)
+		reply.Term = rf.term
+		fmt.Printf("I, %v, vote %v NO\n", rf.me, args.Id)
 	}
 
 	rf.ReleaseMutex()
@@ -412,15 +617,51 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.GetMutex()
 	if rf.term > args.LeaderTerm {
+		fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
+		reply.Success = 0
+		reply.FollowerTerm = rf.term
 		rf.ReleaseMutex()
 		return
 	}
-
+	//heartBeat impact
+	if rf.isLeader {
+		fmt.Printf("!!!!!!!!!!!!!!!!!I %+v, hear from %+v, be follower %+v\n", rf.me, args.LeaderID, rf.logs)
+	}
 	rf.isLeader = false
 	rf.hasLeader = true
 	rf.votedFor = -1
-	//todo, valid check
 	rf.term = args.LeaderTerm
+	//Append Entries impact
+	//findPrev := false
+
+	//fmt.Printf("I have log %+v, args is %+v\n", rf.logs, args)
+	/*
+		if len(rf.logs) == 0 || args.PrevLogIndex == -1 && args.PrevLogTerm == -1 {
+			if len(rf.logs) == 0 || len(args.Entries) == 0 || rf.logs[len(rf.logs)-1] != args.Entries[len(args.Entries)-1] {
+				rf.logs = append(rf.logs, args.Entries...)
+			}
+			findPrev = true
+		}
+		if !findPrev {
+			for i, log := range rf.logs {
+				if log.Index == args.PrevLogIndex && log.Term == args.PrevLogTerm {
+					findPrev = true
+					rf.logs = rf.logs[:i+1]
+					rf.logs = append(rf.logs, args.Entries...)
+					break
+				}
+			}
+		}
+
+		if !findPrev {
+			reply.Success = 0
+		} else {
+			reply.Success = 1
+		}
+		reply.FollowerTerm = rf.term
+	*/
+	//fmt.Printf("I,%+v, has log:%+v, I receive %+v\n", rf.me, rf.logs, args)
+
 	rf.ReleaseMutex()
 }
 
@@ -453,7 +694,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //server int, args *RequestVoteArgs, reply *RequestVoteReply
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, c chan int /*, wg *sync.WaitGroup*/) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply /*, wg *sync.WaitGroup*/) bool {
 	//fmt.Printf("I am calling to server %v, by %v\n", server, args.Id)
 	//defer wg.Done()
 	//defer fmt.Printf("requestVote's %v is ok!", server)
@@ -496,7 +737,25 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.GetMutex()
+	index = len(rf.logs)
+	term = int(rf.term)
+	isLeader = rf.isLeader
 
+	if !isLeader {
+		rf.ReleaseMutex()
+		return index, term, isLeader
+	}
+
+	log := LogEntry{
+		Cmd:   command,
+		Term:  rf.term,
+		Index: int64(len(rf.logs)),
+	}
+
+	rf.logs = append(rf.logs, log)
+
+	rf.ReleaseMutex()
 	return index, term, isLeader
 }
 
@@ -539,6 +798,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.nextIndexMap = make(map[int]int64)
+	rf.matchIndexMap = make(map[int]int64)
 
 	rf.votedFor = -1
 
