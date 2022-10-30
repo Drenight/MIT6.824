@@ -135,3 +135,39 @@ lab2需要实现：
 - 现在的思路是，晋升leader后立刻触发一次AppendEntries，不知道有没有用，按道理也就100ms内该发了呀，难道是抢锁一直抢不到？
   - 把非leader 5ms循环check发心跳的逻辑去掉了，改成晋升后发一次，所有AE都100ms，减少了一部分test3的fail，还是有，继续debug
     - 非leader频繁5ms上锁看起来影响到成功率了
+- 221030定位原因了，milliesecond误写成nanosecond，改成后撞见一个没release mutex的if分支，锁了两次，直接把tester卡住
+
+有个点花了很久才想通：raft怎么同时做到
+1. 拒绝低Term的AE
+2. 拒绝不up-to-date的log的AE
+- [stackoverflow](https://stackoverflow.com/questions/47568168/how-raft-follower-rejoin-after-network-disconnected)
+  - 就是要在一台机器断网，带着高term和短log回来的时候，**让leader下台**
+  - 然后让整个集群一直尝试选leader，直到有一个含整个log的机器，term增长到$>10$，整个集群恢复正常
+  - >If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
+
+关于应用传入信息：
+- one()，给10s时间，在线的机器中需要有个leader来响应，消费掉这条cmd
+- 测试中有绕过one直接发给离线机器的start的方法，看到不用confuse
+
+### 221102，2B的backup测试点一直不稳定
+- 看到的log是一直竞选不出leader
+- 目前猜测是活锁，一直竞选不上leader
+
+目前的开发效率感觉比较低下，一方面2B的一轮测试要花费超过1min，开多窗也需要人在屏幕前等到log分散开；
+长时间的测试导致现在的开发工作流不合理：摇老虎机等bug复现，读冗长的log，推理自己tricky的实现，很浪费时间
+
+> most of your bugs will be a result of not faithfully following Figure 2.
+
+接下来准备做两个事情
+1. 按照几个课程建议文档，重构下代码，把诸如hasleader这种自己很tricky的实现，换成朴素的文档推荐的实现，降低debug心智成本
+2. > We will be talking about Figure 2 a lot in the rest of this article. It needs to be followed **to the letter**.别自己瞎搞了，提供正确性的系统，很容易出错
+   - [Students' Guide](https://thesquareplanet.com/blog/students-guide-to-raft/)
+     1. >Many of our students assumed that heartbeats were somehow “special”; that when a peer receives a heartbeat, it should treat it differently from a non-heartbeat AppendEntries RPC. In particular, many would simply reset their election timer when they received a heartbeat, and then return success, without performing any of the checks specified in Figure 2. This is extremely dangerous. By accepting the RPC, the follower is implicitly telling the leader that their log matches the leader’s log up to and including the prevLogIndex included in the AppendEntries arguments. Upon receiving the reply, the leader might then decide (incorrectly) that some entry has been replicated to a majority of servers, and start committing it.
+     2. appendEntries不能truncate然后append args的全部，因为这个req可能过时了，后面有更新的log    
+   - [Raft Locking Advice 锁文档](http://nil.csail.mit.edu/6.824/2021/labs/raft-locking.txt)
+     1. 推敲所有现有的锁逻辑 
+     2. 重获锁后，校验是否有状态变化
+   - [Raft Structure Advice 结构文档](http://nil.csail.mit.edu/6.824/2021/labs/raft-structure.txt)
+     1. hasleader->结构体内的lastHeartBeatTS
+     2. 开独立线程,去applyMsg,因为写chan可能会阻塞
+3. 优化下测试方法，搞明白多窗同时开会不会有问题，注释单点测backup之类

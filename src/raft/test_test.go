@@ -379,7 +379,7 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
-
+	//到这儿都对的
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
@@ -448,6 +448,7 @@ func TestBackup2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout / 2)
 
 	// bring original leader back to life,
+	// 这里出问题，一直选不出新leader
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
@@ -460,7 +461,6 @@ func TestBackup2B(t *testing.T) {
 		cfg.one(rand.Int(), 3, true)
 	}
 
-	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
