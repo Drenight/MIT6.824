@@ -116,8 +116,8 @@ func (rf *Raft) bkgRunningCheckVote() {
 			//fmt.Printf("Try %v...", rf.me)
 			rf.GetMutex()
 			//fmt.Printf("Ok %v!", rf.me)
-			if rf.hasLeader || (rf.votedFor != -1 && rf.votedFor != rf.me) { //has get new leader OR has voted in this term
-				//fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
+			if /*rf.isLeader ||*/ rf.hasLeader /*|| (rf.votedFor != -1 && rf.votedFor != rf.me)*/ { //has get new leader OR has voted in this term
+				fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
 				rf.ReleaseMutex()
 				//fmt.Printf("Release lock %v!\n", rf.me)
 				continue
@@ -150,7 +150,8 @@ func (rf *Raft) bkgRunningCheckVote() {
 				//wg.Add(len(rf.peers) - 1)
 
 				//allCnt := 0
-				//startTime := time.Now().UnixNano()
+				startTime := time.Now().UnixMilli()
+				//startTimeMillie := time.Now().UnixMilli()
 
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
@@ -162,120 +163,56 @@ func (rf *Raft) bkgRunningCheckVote() {
 						st := time.Now().UnixMilli()
 						rf.sendRequestVote(i, &args, &reply /*, &wg*/)
 						rf.GetMutex()
-						fmt.Printf("%+v consume%v vote req done, now I votedfor%v get %+v, cntYes%v, half%v\n", rf.me, time.Now().UnixMilli()-st, rf.votedFor, reply, cntYes, len(rf.peers)/2)
+						fmt.Printf("%+v consume%v vote req done, now my votedfor%v get %+v, cntYes%v, half%v\n", rf.me, time.Now().UnixMilli()-st, rf.votedFor, reply, cntYes, len(rf.peers)/2)
 						defer rf.ReleaseMutex()
-						if rf.votedFor != rf.me {
-							return
-						}
-						if reply.Term > rf.term {
-							rf.term = reply.Term
-							rf.votedFor = -1
-							return
-						}
+						//if rf.votedFor != rf.me {
+						//	return
+						//}
+						//if reply.Term > rf.term {
+						//	rf.term = reply.Term
+						//	rf.votedFor = -1
+						//	return
+						//}
 						if reply.VoteAsLeader {
 							cntYes += 1
-							if cntYes > len(rf.peers)/2 {
-								rf.beLeader()
-								rf.doHeartBeat()
-							}
+							//if cntYes == len(rf.peers)/2+1 {
+							//	rf.beLeader()
+							//	rf.doHeartBeat()
+							//}
 						} else if !reply.VoteAsLeader {
 							cntNo += 1
 						}
 					}(tmp)
 				}
-				/*
-					for {
-						time.Sleep(time.Millisecond * time.Duration(5))
-						rf.GetMutex()
-						if rf.hasLeader {
-							rf.ReleaseMutex()
-							break
-						}
-						if cntYes > len(rf.peers)/2 { //odd
-							rf.beLeader()
-							rf.doHeartBeat()
-							//rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
-							rf.ReleaseMutex()
-							break
-						}
-						if cntNo > len(rf.peers)/2 {
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							break
-						}
-						if time.Now().UnixNano()-startTime > 1000 {
-							//fmt.Printf("TLE %v\n", rf.me)
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							//break
-						}
+
+				for {
+					time.Sleep(time.Millisecond * time.Duration(5))
+					rf.GetMutex()
+					if rf.hasLeader {
+						rf.ReleaseMutex()
+						break
 					}
-				*/
+					if cntYes > len(rf.peers)/2 { //odd
+						rf.beLeader()
+						rf.doHeartBeat()
+						rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
+						rf.ReleaseMutex()
+						break
+					}
+					if cntNo > len(rf.peers)/2 {
+						rf.votedFor = -1
+						rf.ReleaseMutex()
+						break
+					}
+					if time.Now().UnixMilli()-startTime > 50 {
+						rf.votedFor = -1
+						rf.ReleaseMutex()
+						break
+					}
+					rf.ReleaseMutex()
+				}
+
 				//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
-
-				/*
-					for true {
-						if cntYes > len(rf.peers)/2 { //get vote from majority
-							rf.GetMutex()
-							rf.beLeader() //beleader
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							time.Sleep(time.Second) //leader rest
-							break
-						} else if allCnt == len(rf.peers)-1 {
-							rf.GetMutex()
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							break
-						} else if cntNo >= len(rf.peers)/2 {
-							rf.GetMutex()
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							break
-						} else if time.Now().UnixNano()-startTime > 3000 {
-							rf.GetMutex()
-							rf.votedFor = -1
-							rf.ReleaseMutex()
-							break
-						}
-						x := <-c	//怀疑半年前这样写，会阻塞住一直不触发3000ms退出，尝试重写 221024，尝试成功，显著降低失败率，我好牛逼
-						allCnt++
-						if x == 1 {
-							cntYes++
-						} else {
-							cntNo++
-						}
-					}
-					fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v\n", rf.me, cntYes, cntNo, len(rf.peers))
-				*/
-
-				//fmt.Printf("After Lock %v waiting", rf.me)
-				//wg.Wait()
-				//fmt.Printf("Waitgroup locking %v Done\n", rf.me)
-				//if leader comes back, the cnt must be <(?)
-
-				//fmt.Printf("did I wait?")
-				/*
-					for i := 0; i < len(rf.peers); i++ {
-						if replys[i].VoteAsLeader {
-							fmt.Printf("voteFrom%v ", i)
-							cnt++
-						}
-					}
-				*/
-
-				/*
-					for true {
-						if allCnt == len(rf.peers)-1 {
-							break
-						}
-						_ = <-c
-						allCnt++
-					}
-				*/
-
-				//fmt.Printf("**I am %v, all vote done\n", rf.me)
-				//rf.ReleaseMutex()
 			}
 		}
 	}
@@ -312,13 +249,11 @@ func (rf *Raft) bkgRunningAppendEntries() {
 			return
 		} else {
 			time.Sleep(time.Millisecond * time.Duration(100))
-			//ts := time.Now().UnixNano()
+			ts := time.Now().UnixNano()
 			//fmt.Printf("$$I, %v, is leader of term%v, Try mutex for my AE!\n", rf.me, rf.term)
 			rf.GetMutex()
-			//fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
 			if rf.isLeader {
-				//rf.ReleaseMutex()
-				//fmt.Printf("%+v\n", rf.logs)
+				fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
 				rf.doHeartBeat()
 				rf.ReleaseMutex()
 				//fmt.Printf("$$I, %v, is leader of term%v, start my AE!\n", rf.me, rf.term)
@@ -594,14 +529,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	fmt.Printf("I am %v, args is %+v\n", rf.me, args)
 
-	if rf.term < args.Term {
-		rf.term = args.Term
-		rf.votedFor = -1
-	}
+	//if rf.term < args.Term {
+	//	rf.term = args.Term
+	//	rf.votedFor = -1
+	//}
 
-	if rf.votedFor == -1 || rf.votedFor == args.Id { //todo,split vote?
+	if rf.term < args.Term && rf.votedFor == -1 || rf.votedFor == args.Id { //todo,split vote?
 		rf.votedFor = args.Id
-		rf.term = args.Term
 		reply.VoteAsLeader = true
 		reply.Term = rf.term
 		fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)

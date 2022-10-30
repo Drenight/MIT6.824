@@ -126,4 +126,12 @@ lab2需要实现：
     ```
     - 查出来了，```fmt.Printf("%+v", rf.mu) //我猜是你小子报的race```，用+v读一把锁住的锁，会产生竞态
 
+  - 睡1s后自身可能成为leader，这里的bug被修复了
 
+## 2B 
+2B的开发过程中，2A的test3没法通过，看到的现象是新选上的leader来不及发心跳，就被断网，上一轮leader仍然活跃
+- 具体原因，目前猜测是代码变长，单轮AppendEntries变慢
+- DONE或许我需要了解一下go test 怎么多次跑，这样省的盯着复现
+- 现在的思路是，晋升leader后立刻触发一次AppendEntries，不知道有没有用，按道理也就100ms内该发了呀，难道是抢锁一直抢不到？
+  - 把非leader 5ms循环check发心跳的逻辑去掉了，改成晋升后发一次，所有AE都100ms，减少了一部分test3的fail，还是有，继续debug
+    - 非leader频繁5ms上锁看起来影响到成功率了
