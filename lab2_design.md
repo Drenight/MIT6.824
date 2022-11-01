@@ -136,3 +136,11 @@ lab2需要实现：
   - 把非leader 5ms循环check发心跳的逻辑去掉了，改成晋升后发一次，所有AE都100ms，减少了一部分test3的fail，还是有，继续debug
     - 非leader频繁5ms上锁看起来影响到成功率了
 - 221030定位原因了，milliesecond误写成nanosecond，改成后撞见一个没release mutex的if分支，锁了两次，直接把tester卡住
+
+有个点花了很久才想通：raft怎么同时做到
+1. 拒绝低Term的AE
+2. 拒绝不up-to-date的log的AE
+- [stackoverflow](https://stackoverflow.com/questions/47568168/how-raft-follower-rejoin-after-network-disconnected)
+  - 就是要在一台机器断网，带着高term和短log回来的时候，**让leader下台**
+  - 然后让整个集群一直尝试选leader，直到有一个含整个log的机器，term增长到$>10$，整个集群恢复正常
+  - >If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower

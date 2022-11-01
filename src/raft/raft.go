@@ -73,11 +73,13 @@ type Raft struct {
 	hasLeader bool
 	term      int64 //term ME kept in logs
 	votedFor  int   //leader voted for in this term, -1 for NULL, self means is candidate
+	isLeader  bool
+	logs      []LogEntry //blank occupy index0, so start from 1
+	//Volatile state on all servers:
+	commitIndex int64 //whole cluster's highest commit
+	lastApplied int64 //my last applied log index
 
-	isLeader      bool
-	logs          []LogEntry
-	commitIndex   int64
-	lastApplied   int64
+	//Volatile state on leaders:
 	nextIndexMap  map[int]int64
 	matchIndexMap map[int]int64
 }
@@ -85,10 +87,33 @@ type Raft struct {
 func (rf *Raft) beLeader() {
 	rf.isLeader = true
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndexMap[i] = int64(len(rf.logs))
+		//for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+		rf.nextIndexMap[i] = rf.logs[len(rf.logs)-1].Index + 1
+		//for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 		rf.matchIndexMap[i] = 0
 	}
 	fmt.Printf("**I, %v become leader of Term %v\n", rf.me, rf.term)
+}
+
+func (rf *Raft) beFollowerStepDownWithoutLeader(term int64) {
+	rf.isLeader = false
+	rf.votedFor = -1
+	rf.term = term
+	fmt.Printf("I %v become follower at term %v\n", rf.me, term)
+}
+
+func (rf *Raft) applyAfterCommitChange() {
+	if rf.commitIndex > rf.lastApplied {
+		for now := rf.lastApplied + 1; now <= int64(Min(int(rf.commitIndex), int(rf.logs[len(rf.logs)-1].Index))); now++ { //全集群的commit可能大于本机log长度
+			commitMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[now].Cmd,
+				CommandIndex: int(now),
+			}
+			rf.applyCh <- commitMsg
+			rf.lastApplied = int64(commitMsg.CommandIndex)
+		}
+	}
 }
 
 func (rf *Raft) bkgRunningCheckVote() {
@@ -117,10 +142,8 @@ func (rf *Raft) bkgRunningCheckVote() {
 			//fmt.Printf("Try %v...", rf.me)
 			rf.GetMutex()
 			//fmt.Printf("Ok %v!", rf.me)
-			if /*rf.isLeader ||*/ rf.hasLeader /*|| (rf.votedFor != -1 && rf.votedFor != rf.me)*/ { //has get new leader OR has voted in this term
-				fmt.Printf("I, %v already has leader or voted, voted for is %v ", rf.me, rf.votedFor)
+			if rf.hasLeader { //has get new leader OR has voted in this term
 				rf.ReleaseMutex()
-				//fmt.Printf("Release lock %v!\n", rf.me)
 				continue
 			} else { //be candidate, start to sendRequestVote
 
@@ -134,25 +157,19 @@ func (rf *Raft) bkgRunningCheckVote() {
 				rf.votedFor = rf.me
 
 				args := RequestVoteArgs{
-					Term: rf.term,
-					Id:   rf.me,
+					Term:         rf.term,
+					Id:           rf.me,
+					LastLogIndex: rf.logs[len(rf.logs)-1].Index,
+					LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 				}
 				//replys := make([]RequestVoteReply, len(rf.peers))
 				cntYes := 1
 				cntNo := 0
 				//var wg sync.WaitGroup
-
-				//start rpc and release lock
-				//expect AERPC lock modify all, which is more prior
-				//args is locked value, wont change result of RPCs
 				rf.ReleaseMutex()
-				//fmt.Printf("Release lock %v!\n", rf.me)
-
-				//wg.Add(len(rf.peers) - 1)
-
-				//allCnt := 0
 				startTime := time.Now().UnixMilli()
-				//startTimeMillie := time.Now().UnixMilli()
+
+				faceHighTerm := -1
 
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
@@ -161,42 +178,41 @@ func (rf *Raft) bkgRunningCheckVote() {
 					tmp := i //classic bug, using iteration args with multithread
 					go func(i int) {
 						reply := RequestVoteReply{}
-						st := time.Now().UnixMilli()
-						rf.sendRequestVote(i, &args, &reply /*, &wg*/)
+						rf.sendRequestVote(i, &args, &reply)
 						rf.GetMutex()
-						fmt.Printf("%+v consume%v vote req done, now my votedfor%v get %+v, cntYes%v, half%v\n", rf.me, time.Now().UnixMilli()-st, rf.votedFor, reply, cntYes, len(rf.peers)/2)
 						defer rf.ReleaseMutex()
-						//if rf.votedFor != rf.me {
-						//	return
-						//}
-						//if reply.Term > rf.term {
-						//	rf.term = reply.Term
-						//	rf.votedFor = -1
-						//	return
-						//}
-						if reply.VoteAsLeader {
+						if reply.VoteGranted {
 							cntYes += 1
-							//if cntYes == len(rf.peers)/2+1 {
-							//	rf.beLeader()
-							//	rf.doHeartBeat()
-							//}
-						} else if !reply.VoteAsLeader {
+						} else if !reply.VoteGranted {
+							if reply.Term > rf.term {
+								faceHighTerm = int(reply.Term)
+							}
 							cntNo += 1
 						}
 					}(tmp)
 				}
 
+				rf.GetMutex()
+				if faceHighTerm != -1 {
+					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
+					rf.ReleaseMutex()
+					continue
+				}
+				rf.ReleaseMutex()
+
 				for {
 					time.Sleep(time.Millisecond * time.Duration(5))
 					rf.GetMutex()
-					if rf.hasLeader {
+					//If AppendEntries RPC received from new leader: convert to follower
+					if rf.hasLeader /*|| rf.votedFor != rf.me*/ {
 						rf.ReleaseMutex()
 						break
 					}
 					if cntYes > len(rf.peers)/2 { //odd
 						rf.beLeader()
+						//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
 						rf.doHeartBeat()
-						rf.votedFor = -1 //?不一定要改，通过高term覆盖就可以了？
+						rf.votedFor = -1
 						rf.ReleaseMutex()
 						break
 					}
@@ -237,7 +253,7 @@ func (rf *Raft) doHeartBeat() {
 		if i == rf.me {
 			continue
 		}
-		args := AppendEntriesArgs{IsHeartBeat: true, LeaderID: int64(rf.me), LeaderTerm: rf.term}
+		args := AppendEntriesArgs{LeaderID: int64(rf.me), LeaderTerm: rf.term}
 		reply := AppendEntriesReply{}
 		go func(to int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 			rf.sendAppendEntries(to, args, reply)
@@ -248,92 +264,37 @@ func (rf *Raft) doHeartBeat() {
 func (rf *Raft) bkgRunningAppendEntries() {
 	for {
 		if rf.killed() {
-			//fmt.Printf("%v this is dead\n", rf.me)
-			//time.Sleep(time.Millisecond * time.Duration(5))
 			return
 		} else {
 			time.Sleep(time.Millisecond * time.Duration(100))
-			ts := time.Now().UnixNano()
-			//fmt.Printf("$$I, %v, is leader of term%v, Try mutex for my AE!\n", rf.me, rf.term)
 			rf.GetMutex()
 			if rf.isLeader {
-				fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
+				//fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
 				//rf.doHeartBeat()
 				rf.ReleaseMutex()
 				//fmt.Printf("$$I, %v, is leader of term%v, start my AE!\n", rf.me, rf.term)
-
+				//continue
 				//var wg sync.WaitGroup
 				//wg.Add(len(rf.peers) - 1)
 				cntDone := 0
-				//rf.doHeartBeat()
-				/*
-					rf.GetMutex()
-					//fmt.Printf("$$I, %v, is leader of term%v, Mutex for AE args get!\n", rf.me, rf.term)
-
-					//var argsList []AppendEntriesArgs
-					//var replyList []AppendEntriesReply
-
-					for i := 0; i < len(rf.peers); i++ {
-						if i == rf.me {
-							argsList = append(argsList, AppendEntriesArgs{})
-							replyList = append(replyList, AppendEntriesReply{})
-							continue
-						}
-
-						var entries []LogEntry
-
-						//for j := rf.nextIndexMap[i]; j < int64(len(rf.logs)); j++ {
-						//	entries = append(entries, rf.logs[j])
-						//}
-						entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
-						//fmt.Printf("%+v\n", entries)
-						prevLogIndex := int64(-1)
-						prevLogTerm := int64(-1)
-						if len(rf.logs) > 1 {
-							prevLogIndex = rf.logs[len(rf.logs)-2].Index
-							prevLogTerm = rf.logs[len(rf.logs)-2].Term
-						}
-
-						args := AppendEntriesArgs{
-							LeaderID:   int64(rf.me),
-							LeaderTerm: rf.term,
-							//PrevLogTerm:	//有prev，清掉follower后面；没prev，减leader的map；记得是无限回退找lca的
-							PrevLogIndex: prevLogIndex,
-							PrevLogTerm:  prevLogTerm,
-							Entries:      entries,
-							LeaderCommit: rf.commitIndex,
-						}
-
-						//测试args
-						//args := AppendEntriesArgs{LeaderID: int64(rf.me), LeaderTerm: rf.term}
-						reply := AppendEntriesReply{}
-						argsList = append(argsList, args)
-						replyList = append(replyList, reply)
-					}
-
-					rf.ReleaseMutex()
-				*/
-				//fmt.Printf("$$I, %v, is leader of term%v, AE args ready!\n", rf.me, rf.term)
-				//continue
+				faceHighTerm := -1
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
 						continue
 					}
 
 					tmp := i
-					go func(i int) { //while true here
+					//Do replicate to server i
+					go func(i int) {
 						rf.GetMutex()
-						//for {
 						var entries []LogEntry
-						prevLogIndex := int64(-1)
-						prevLogTerm := int64(-1)
-						fmt.Printf("I %+v have log%+v, matchMap%+v,nextMap%+v\n", rf.me, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
-						//有新东西可以发
-						if len(rf.logs) > int(rf.matchIndexMap[i])+1 { //map default -1，match单调增更基准一些,next会被初始化成logsize
-							prevLogIndex = int64(len(rf.logs) - 1) //rf.nextIndexMap[i] - 1 //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
-							if rf.nextIndexMap[i] != 0 {
-								prevLogIndex = rf.nextIndexMap[i] - 1
-							}
+						prevLogIndex := int64(0)
+						prevLogTerm := int64(0)
+						//fmt.Printf("I %+v have log%+v, matchMap%+v,nextMap%+v\n", rf.me, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
+
+						//If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
+						if int(rf.logs[len(rf.logs)-1].Index) >= int(rf.nextIndexMap[i]) {
+							prevLogIndex = rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
 							prevLogTerm = rf.logs[prevLogIndex].Term
 							entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
 						}
@@ -345,13 +306,18 @@ func (rf *Raft) bkgRunningAppendEntries() {
 							PrevLogTerm:  prevLogTerm,
 							Entries:      entries,
 							LeaderCommit: rf.commitIndex,
+							//below two didn't show on figure 2, I use them to check up-to-date
+							LastLogIndex: rf.logs[len(rf.logs)-1].Index,
+							LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 						}
 						reply := AppendEntriesReply{}
+						fmt.Printf("***[LEADER]I am %+v,to %+v,AE args is %+v, I have log%+v,matchIndexMap%+v,nextIndexMap%+v\n", rf.me, tmp, args, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
 						rf.ReleaseMutex()
 						rf.sendAppendEntries(i, &args, &reply)
-						fmt.Printf("I am %+v,AE args is %+v\n", rf.me, args)
+
 						//fmt.Printf("%+v\n", len(args.Entries))
 						if reply.Success == 1 {
+							//If successful: update nextIndex and matchIndex for follower (§5.3)
 							rf.GetMutex()
 							if len(args.Entries) != 0 {
 								rf.matchIndexMap[i] = args.Entries[len(args.Entries)-1].Index
@@ -360,10 +326,16 @@ func (rf *Raft) bkgRunningAppendEntries() {
 							cntDone += 1
 							rf.ReleaseMutex()
 						} else {
-							fmt.Printf("?,I %v got rej from %v\n", rf.me, i)
+							//fmt.Printf("?,I %v got rej from %v,reason %v\n", rf.me, i, reply.Success)
 							rf.GetMutex()
+							if reply.Term > rf.term {
+								faceHighTerm = int(reply.Term)
+							}
 							cntDone += 1
-							rf.nextIndexMap[i] -= 1
+							//If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
+							if reply.Success == -1 {
+								rf.nextIndexMap[i] -= 1
+							}
 							rf.ReleaseMutex()
 						}
 					}(tmp)
@@ -371,43 +343,10 @@ func (rf *Raft) bkgRunningAppendEntries() {
 				st := time.Now().UnixMilli()
 				//fmt.Printf("I %v, start waiting for AE reply\n", rf.me)
 
+				//waiter...
 				for {
 					time.Sleep(time.Millisecond * time.Duration(5))
 					rf.GetMutex()
-					maxMatch := -1
-					lb := 0
-					rb := len(rf.logs)
-					for lb <= rb {
-						mid := (lb + rb) / 2
-						tstFlg := true
-						for it, _ := range rf.peers {
-							if it == rf.me {
-								continue
-							}
-							if rf.matchIndexMap[it] < int64(mid) {
-								tstFlg = false
-								break
-							}
-						}
-						if tstFlg {
-							maxMatch = Max(maxMatch, mid)
-							lb = mid + 1
-						} else {
-							rb = mid - 1
-						}
-					}
-
-					for now := rf.commitIndex + 1; now <= int64(maxMatch); now++ {
-						commitMsg := ApplyMsg{
-							CommandValid: true,
-							Command:      rf.logs[now].Cmd,
-							CommandIndex: int(now),
-						}
-						rf.applyCh <- commitMsg
-					}
-
-					rf.commitIndex = int64(maxMatch)
-					fmt.Printf("\n_______%+v, has commitIndex %v\n", rf.me, rf.commitIndex)
 					if time.Now().UnixMilli()-st > 50 {
 						rf.ReleaseMutex()
 						break
@@ -419,7 +358,49 @@ func (rf *Raft) bkgRunningAppendEntries() {
 					rf.ReleaseMutex()
 				}
 
-				fmt.Printf("I %v collect %v AE reply consuming %v\n", rf.me, cntDone, time.Now().UnixMilli()-st)
+				rf.GetMutex()
+				//If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+				if faceHighTerm != -1 {
+					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
+					rf.ReleaseMutex()
+					continue
+				}
+
+				//If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+				maxMatch := -1
+				maxMatchTerm := -1
+				lb := 0
+				rb := len(rf.logs)
+				for lb <= rb {
+					mid := (lb + rb) / 2
+					tstCounter := 1 //自己
+					for it, _ := range rf.peers {
+						if it == rf.me {
+							continue
+						}
+						if rf.matchIndexMap[it] >= int64(mid) {
+							tstCounter += 1
+						}
+					}
+					if tstCounter > len(rf.peers)/2 {
+						maxMatch = Max(maxMatch, mid)
+						maxMatchTerm = int(rf.logs[mid].Term)
+						lb = mid + 1
+					} else {
+						rb = mid - 1
+					}
+				}
+				//and log[N].term == currentTerm (Low term can not be committed independently)
+				if maxMatch > int(rf.commitIndex) && rf.term == int64(maxMatchTerm) {
+					rf.commitIndex = int64(maxMatch)
+					//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
+					rf.applyAfterCommitChange()
+				}
+
+				rf.ReleaseMutex()
+				//fmt.Printf("\n_______%+v, has commitIndex %v\n", rf.me, rf.commitIndex)
+
+				//fmt.Printf("I %v collect %v AE reply consuming %v\n", rf.me, cntDone, time.Now().UnixMilli()-st)
 				//rf.ReleaseMutex()
 				//time.Sleep(time.Millisecond * time.Duration(90))
 				//wg.Wait()
@@ -500,17 +481,20 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Id   int
-	Term int64
+	Id           int
+	Term         int64
+	LastLogIndex int64
+	LastLogTerm  int64
 }
 type AppendEntriesArgs struct {
-	IsHeartBeat  bool
 	LeaderID     int64
 	LeaderTerm   int64
 	PrevLogIndex int64
 	PrevLogTerm  int64
 	Entries      []LogEntry
 	LeaderCommit int64
+	LastLogIndex int64
+	LastLogTerm  int64
 }
 
 //
@@ -519,12 +503,12 @@ type AppendEntriesArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	VoteAsLeader bool
-	Term         int64
+	VoteGranted bool
+	Term        int64
 }
 type AppendEntriesReply struct {
-	FollowerTerm int64
-	Success      int64 //follower's last log is prev
+	Term    int64
+	Success int64 //follower's last log is prev
 }
 
 //
@@ -532,52 +516,108 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//fmt.Printf("I am called by %v, going to LOCK %v", args.Id, rf.me)
+	fmt.Printf("RV------I am %v,args is %+v\n", rf.me, args)
 	rf.GetMutex() //BUG DEAD LOCK?
-	//fmt.Printf("I am called by %v, LOCKED %v", args.Id, rf.me)
+	defer rf.ReleaseMutex()
 
-	fmt.Printf("I am %v, args is %+v\n", rf.me, args)
-
-	//if rf.term < args.Term {
-	//	rf.term = args.Term
-	//	rf.votedFor = -1
-	//}
-
-	if rf.term < args.Term && rf.votedFor == -1 || rf.votedFor == args.Id { //todo,split vote?
-		rf.votedFor = args.Id
-		reply.VoteAsLeader = true
+	//Reply false if term < currentTerm (§5.1)
+	if args.Term < rf.term {
+		reply.VoteGranted = false
 		reply.Term = rf.term
-		fmt.Printf("I, %v, vote %v YES\n", rf.me, args.Id)
-	} else {
-		reply.VoteAsLeader = false
-		reply.Term = rf.term
-		fmt.Printf("I, %v, vote %v NO\n", rf.me, args.Id)
-	}
-
-	rf.ReleaseMutex()
-	//fmt.Printf("I am called by %v, going to RELEASE %v\n", args.Id, rf.me)
-}
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.GetMutex()
-	if rf.term > args.LeaderTerm {
-		fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
-		reply.Success = 0
-		reply.FollowerTerm = rf.term
-		rf.ReleaseMutex()
 		return
 	}
+
+	//?
+	/*
+		if rf.isLeader {
+			reply.VoteGranted = false
+			reply.Term = rf.term
+			return
+		}
+	*/
+
+	//If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+	if args.LastLogTerm < rf.logs[len(rf.logs)-1].Term {
+		fmt.Printf("************************************%+v...%+v\n", args.LastLogTerm, rf.logs[len(rf.logs)-1].Term)
+		reply.VoteGranted = false
+		reply.Term = rf.term
+		return
+	} else if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex < rf.logs[len(rf.logs)-1].Index {
+		fmt.Printf("************************************%+v...%+v\n", args.LastLogIndex, rf.logs[len(rf.logs)-1].Index)
+		reply.VoteGranted = false
+		reply.Term = rf.term
+		return
+	}
+
+	//If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+	if args.Term > rf.term && rf.isLeader {
+		rf.beFollowerStepDownWithoutLeader(args.Term)
+	}
+
+	if rf.votedFor == -1 || rf.votedFor == args.Id {
+		rf.term = args.Term
+		rf.votedFor = args.Id
+		reply.VoteGranted = true
+		reply.Term = rf.term
+	} else {
+		reply.VoteGranted = false
+		reply.Term = rf.term
+	}
+}
+
+//0 means term, -1 means didn't find
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.GetMutex()
+	defer rf.ReleaseMutex()
+	fmt.Printf("AE------I am %v,args is %+v\n", rf.me, args)
+	if args.LeaderTerm < rf.term {
+		fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
+		reply.Success = 0
+		reply.Term = rf.term
+		return
+	}
+
+	if args.LastLogTerm < rf.logs[len(rf.logs)-1].Term {
+		reply.Success = 0
+		reply.Term = rf.term
+		fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
+		return
+	} else if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex < rf.logs[len(rf.logs)-1].Index {
+		reply.Success = 0
+		reply.Term = rf.term
+		fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
+		return
+	}
+
+	//heartBeat impact
+	if rf.isLeader {
+		fmt.Printf("!!!!!!!!!!!!!!!!!I %+v, hear from %+v, be follower, my log %+v, his log%+v\n", rf.me, args.LeaderID, rf.logs, args.Entries)
+		fmt.Printf("XXXXX his lastLogTerm:%+v, my lastLogTerm%+v\n", args.LastLogTerm, rf.logs[len(rf.logs)-1].Term)
+		fmt.Printf("YYYYY his lastlogIndex:%+v, my lastLogIndex%+v\n", args.LastLogIndex, rf.logs[len(rf.logs)-1].Index)
+		//rf.beFollowerStepDownWithLeader(args.LeaderTerm, args.LeaderID)
+		//rf.beFollowerStepDownWithoutLeader(args.LeaderTerm)
+	}
+	rf.isLeader = false
+	rf.hasLeader = true
+	rf.votedFor = -1
+	rf.term = args.LeaderTerm
+	reply.Success = 1
+	reply.Term = rf.term
+
 	//Append Entries impact 1: update logs
 	findPrev := false
 
 	fmt.Printf("I have log %+v, args is %+v\n", rf.logs, args)
 
-	if len(args.Entries) == 0 || len(rf.logs) == 0 || args.PrevLogIndex == -1 && args.PrevLogTerm == -1 { //心跳 or 第一条
+	rf.hasLeader = true
+
+	if len(args.Entries) == 0 { //心跳
 		findPrev = true
 		rf.logs = append(rf.logs, args.Entries...)
 	}
-	if !findPrev { //第二条，开始在自己的log找prev
+	if !findPrev { //args有log，开始在自己的log找prev
 		for i, log := range rf.logs {
-			if log.Index == args.PrevLogIndex /*&& log.Term == args.PrevLogTerm*/ { //冲突term的删掉
+			if log.Index == args.PrevLogIndex && log.Term == args.PrevLogTerm { //冲突term的删掉
 				findPrev = true
 				rf.logs = rf.logs[:i+1]
 				rf.logs = append(rf.logs, args.Entries...)
@@ -585,39 +625,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
+
+	if !findPrev {
+		reply.Success = -1
+		reply.Term = rf.term
+		return
+	}
+
 	//Append Entries impact 2: update my commitIndex to min (new,leader's)
-	if findPrev {
-		nxt := int64(Min(len(rf.logs)-1, int(args.LeaderCommit)))
-		for now := rf.commitIndex + 1; now <= nxt; now++ {
-			commitMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[now].Cmd,
-				CommandIndex: int(now),
-			}
-			rf.applyCh <- commitMsg
-		}
+	if args.LeaderCommit > rf.commitIndex {
+		nxt := int64(Min(int(rf.logs[len(rf.logs)-1].Index), int(args.LeaderCommit)))
 		rf.commitIndex = nxt
+		rf.applyAfterCommitChange()
 	}
 	fmt.Printf("Follower, My commitIndex %v, findPrev%v\n", rf.commitIndex, findPrev)
 
-	//heartBeat impact
-	if !findPrev {
-		reply.Success = 0
-	} else {
-		reply.Success = 1
-		if rf.isLeader {
-			fmt.Printf("!!!!!!!!!!!!!!!!!I %+v, hear from %+v, be follower %+v\n", rf.me, args.LeaderID, rf.logs)
-		}
-		rf.isLeader = false
-		rf.hasLeader = true
-		rf.votedFor = -1
-		rf.term = args.LeaderTerm
-	}
-	reply.FollowerTerm = rf.term
-
 	//fmt.Printf("I,%+v, has log:%+v, I receive %+v\n", rf.me, rf.logs, args)
-
-	rf.ReleaseMutex()
 }
 
 //
@@ -655,7 +678,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	//defer fmt.Printf("requestVote's %v is ok!", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply) //TODO, kick off a new routine with expiration?
 	//fmt.Printf("I have called to server %v, by %v,ok is %v\n", server, args.Id, reply.VoteAsLeader)
-	if reply.VoteAsLeader {
+	if reply.VoteGranted {
 		return true //c <- 1
 	} else {
 		return false //c <- 0
@@ -707,8 +730,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:  rf.term,
 		Index: int64(len(rf.logs)),
 	}
-
 	rf.logs = append(rf.logs, log)
+
+	fmt.Printf("Receive input log: id%v, now log%+v\n", rf.me, rf.logs)
 
 	rf.ReleaseMutex()
 	return index, term, isLeader
@@ -759,7 +783,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = -1
 
 	rf.votedFor = -1
-	rf.logs = append(rf.logs, LogEntry{})
+	rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
 
 	// Your initialization code here (2A, 2B, 2C).
 
