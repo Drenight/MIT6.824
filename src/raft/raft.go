@@ -294,7 +294,7 @@ func (rf *Raft) bkgRunningAppendEntries() {
 
 						//If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
 						if int(rf.logs[len(rf.logs)-1].Index) >= int(rf.nextIndexMap[i]) {
-							prevLogIndex = rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
+							prevLogIndex = rf.logs[rf.nextIndexMap[i]-1].Index //也感觉不是rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
 							prevLogTerm = rf.logs[prevLogIndex].Term
 							entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
 						}
