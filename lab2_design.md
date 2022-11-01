@@ -144,3 +144,7 @@ lab2需要实现：
   - 就是要在一台机器断网，带着高term和短log回来的时候，**让leader下台**
   - 然后让整个集群一直尝试选leader，直到有一个含整个log的机器，term增长到$>10$，整个集群恢复正常
   - >If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
+
+关于应用传入信息：
+- one()，给10s时间，在线的机器中需要有个leader来响应，消费掉这条cmd
+- 测试中有绕过one直接发给离线机器的start的方法，看到不用confuse

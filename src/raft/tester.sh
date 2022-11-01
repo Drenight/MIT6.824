@@ -12,6 +12,7 @@ for i in $(seq 1 "$2"); do
 
     if time ./raft.test -test.run "$1" &> "$LOG"; then
         echo "Success"
+        rm "$LOG"
     else
         echo "Failed - saving log at FAILED_$LOG"
         mv "$LOG" "FAILED_$LOG"

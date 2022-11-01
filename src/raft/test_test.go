@@ -379,7 +379,7 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
-
+	//到这儿都对的
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)

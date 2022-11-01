@@ -192,6 +192,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}(tmp)
 				}
 
+				/*放在这好像没触发
 				rf.GetMutex()
 				if faceHighTerm != -1 {
 					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
@@ -199,6 +200,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 					continue
 				}
 				rf.ReleaseMutex()
+				*/
 
 				for {
 					time.Sleep(time.Millisecond * time.Duration(5))
@@ -208,7 +210,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 						rf.ReleaseMutex()
 						break
 					}
-					if cntYes > len(rf.peers)/2 { //odd
+					if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
 						rf.beLeader()
 						//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
 						rf.doHeartBeat()
@@ -228,6 +230,13 @@ func (rf *Raft) bkgRunningCheckVote() {
 					}
 					rf.ReleaseMutex()
 				}
+				rf.GetMutex()
+				if faceHighTerm != -1 {
+					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
+					rf.ReleaseMutex()
+					continue
+				}
+				rf.ReleaseMutex()
 
 				//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
 			}
@@ -253,7 +262,16 @@ func (rf *Raft) doHeartBeat() {
 		if i == rf.me {
 			continue
 		}
-		args := AppendEntriesArgs{LeaderID: int64(rf.me), LeaderTerm: rf.term}
+		args := AppendEntriesArgs{
+			LeaderID:     int64(rf.me),
+			LeaderTerm:   rf.term,
+			PrevLogIndex: rf.logs[rf.nextIndexMap[i]-1].Index,
+			PrevLogTerm:  rf.logs[rf.nextIndexMap[i]-1].Term,
+			Entries:      []LogEntry{},
+			LeaderCommit: rf.commitIndex,
+			LastLogIndex: rf.logs[len(rf.logs)-1].Index,
+			LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
+		}
 		reply := AppendEntriesReply{}
 		go func(to int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 			rf.sendAppendEntries(to, args, reply)
@@ -288,16 +306,15 @@ func (rf *Raft) bkgRunningAppendEntries() {
 					go func(i int) {
 						rf.GetMutex()
 						var entries []LogEntry
-						prevLogIndex := int64(0)
-						prevLogTerm := int64(0)
 						//fmt.Printf("I %+v have log%+v, matchMap%+v,nextMap%+v\n", rf.me, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
 
 						//If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
 						if int(rf.logs[len(rf.logs)-1].Index) >= int(rf.nextIndexMap[i]) {
-							prevLogIndex = rf.logs[rf.nextIndexMap[i]-1].Index //也感觉不是rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
-							prevLogTerm = rf.logs[prevLogIndex].Term
 							entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
 						}
+						//和上一个必须解耦，有可能没有新log，但需要删掉follower的内容
+						prevLogIndex := rf.logs[rf.nextIndexMap[i]-1].Index //也感觉不是rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
+						prevLogTerm := rf.logs[rf.nextIndexMap[i]-1 /*prevLogIndex*/].Term
 
 						args := AppendEntriesArgs{
 							LeaderID:     int64(rf.me),
@@ -522,6 +539,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//Reply false if term < currentTerm (§5.1)
 	if args.Term < rf.term {
+		fmt.Printf("I am %v, can not vote %v, my term %v, his term %v\n", rf.me, args.Id, rf.term, args.Term)
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
@@ -538,24 +556,26 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 	if args.LastLogTerm < rf.logs[len(rf.logs)-1].Term {
-		fmt.Printf("************************************%+v...%+v\n", args.LastLogTerm, rf.logs[len(rf.logs)-1].Term)
+		fmt.Printf("*******************TERM*****************I am%v,req from%v,his lastlogterm%+v...while mine%+v\n", rf.me, args.Id, args.LastLogTerm, rf.logs[len(rf.logs)-1].Term)
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
 	} else if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex < rf.logs[len(rf.logs)-1].Index {
-		fmt.Printf("************************************%+v...%+v\n", args.LastLogIndex, rf.logs[len(rf.logs)-1].Index)
+		fmt.Printf("*******************INDEX*****************I am%v,req from%v,his lastlogIndex%+v...while mine%+v\n", rf.me, args.Id, args.LastLogIndex, rf.logs[len(rf.logs)-1].Index)
 		reply.VoteGranted = false
 		reply.Term = rf.term
 		return
 	}
 
 	//If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-	if args.Term > rf.term && rf.isLeader {
-		rf.beFollowerStepDownWithoutLeader(args.Term)
+	if args.Term > rf.term {
+		rf.term = args.Term
+		if rf.isLeader {
+			rf.beFollowerStepDownWithoutLeader(args.Term)
+		}
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.Id {
-		rf.term = args.Term
 		rf.votedFor = args.Id
 		reply.VoteGranted = true
 		reply.Term = rf.term
@@ -608,21 +628,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	findPrev := false
 
 	fmt.Printf("I have log %+v, args is %+v\n", rf.logs, args)
-
-	rf.hasLeader = true
-
-	if len(args.Entries) == 0 { //心跳
-		findPrev = true
-		rf.logs = append(rf.logs, args.Entries...)
-	}
-	if !findPrev { //args有log，开始在自己的log找prev
-		for i, log := range rf.logs {
-			if log.Index == args.PrevLogIndex && log.Term == args.PrevLogTerm { //冲突term的删掉
-				findPrev = true
-				rf.logs = rf.logs[:i+1]
-				rf.logs = append(rf.logs, args.Entries...)
-				break
-			}
+	for i, log := range rf.logs {
+		if log.Index == args.PrevLogIndex && log.Term == args.PrevLogTerm { //冲突term的删掉
+			findPrev = true
+			rf.logs = rf.logs[:i+1]
+			rf.logs = append(rf.logs, args.Entries...)
+			break
 		}
 	}
 
@@ -780,7 +791,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.nextIndexMap = make(map[int]int64)
 	rf.matchIndexMap = make(map[int]int64)
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 
 	rf.votedFor = -1
 	rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
