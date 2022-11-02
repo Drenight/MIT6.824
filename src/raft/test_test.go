@@ -115,6 +115,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.end()
 }
 
+/*
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -396,6 +397,7 @@ func TestRejoin2B(t *testing.T) {
 
 	cfg.end()
 }
+*/
 
 func TestBackup2B(t *testing.T) {
 	servers := 5
@@ -448,6 +450,7 @@ func TestBackup2B(t *testing.T) {
 	time.Sleep(RaftElectionTimeout / 2)
 
 	// bring original leader back to life,
+	// 这里出问题，一直选不出新leader
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
@@ -460,7 +463,6 @@ func TestBackup2B(t *testing.T) {
 		cfg.one(rand.Int(), 3, true)
 	}
 
-	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
@@ -469,6 +471,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.end()
 }
 
+/*
 func TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -578,7 +581,7 @@ loop:
 
 	cfg.end()
 }
-
+*/
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
