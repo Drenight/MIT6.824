@@ -193,6 +193,7 @@ func (rf *Raft) bkgRunningCheckVote() {
 						}
 					}(tmp)
 				}
+				//it should check that rf.currentTerm hasn't changed since the decision to become a candidate.
 
 				for {
 					time.Sleep(time.Millisecond * time.Duration(5))

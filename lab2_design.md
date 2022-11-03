@@ -148,3 +148,26 @@ lab2需要实现：
 关于应用传入信息：
 - one()，给10s时间，在线的机器中需要有个leader来响应，消费掉这条cmd
 - 测试中有绕过one直接发给离线机器的start的方法，看到不用confuse
+
+### 221102，2B的backup测试点一直不稳定
+- 看到的log是一直竞选不出leader
+- 目前猜测是活锁，一直竞选不上leader
+
+目前的开发效率感觉比较低下，一方面2B的一轮测试要花费超过1min，开多窗也需要人在屏幕前等到log分散开；
+长时间的测试导致现在的开发工作流不合理：摇老虎机等bug复现，读冗长的log，推理自己tricky的实现，很浪费时间
+
+> most of your bugs will be a result of not faithfully following Figure 2.
+
+接下来准备做两个事情
+1. 按照几个课程建议文档，重构下代码，把诸如hasleader这种自己很tricky的实现，换成朴素的文档推荐的实现，降低debug心智成本
+2. > We will be talking about Figure 2 a lot in the rest of this article. It needs to be followed **to the letter**.别自己瞎搞了，提供正确性的系统，很容易出错
+   - [Students' Guide](https://thesquareplanet.com/blog/students-guide-to-raft/)
+     1. >Many of our students assumed that heartbeats were somehow “special”; that when a peer receives a heartbeat, it should treat it differently from a non-heartbeat AppendEntries RPC. In particular, many would simply reset their election timer when they received a heartbeat, and then return success, without performing any of the checks specified in Figure 2. This is extremely dangerous. By accepting the RPC, the follower is implicitly telling the leader that their log matches the leader’s log up to and including the prevLogIndex included in the AppendEntries arguments. Upon receiving the reply, the leader might then decide (incorrectly) that some entry has been replicated to a majority of servers, and start committing it.
+     2. appendEntries不能truncate然后append args的全部，因为这个req可能过时了，后面有更新的log    
+   - [Raft Locking Advice 锁文档](http://nil.csail.mit.edu/6.824/2021/labs/raft-locking.txt)
+     1. 推敲所有现有的锁逻辑 
+     2. 重获锁后，校验是否有状态变化
+   - [Raft Structure Advice 结构文档](http://nil.csail.mit.edu/6.824/2021/labs/raft-structure.txt)
+     1. hasleader->结构体内的lastHeartBeatTS
+     2. 开独立线程,去applyMsg,因为写chan可能会阻塞
+3. 优化下测试方法，搞明白多窗同时开会不会有问题，注释单点测backup之类
