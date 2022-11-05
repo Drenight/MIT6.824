@@ -27,7 +27,26 @@ import (
 	"../labrpc"
 )
 
-var voteExpire = int64(300)
+//Time Management Section
+const voteExpire = 300 * time.Millisecond
+const heartBeatInterval = 100 * time.Millisecond
+
+func (rf *Raft) resetVoteExpireTONow() {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf.lastTimeHeardFromMyTermLeader = time.Now().Add(time.Millisecond * time.Duration(r.Int()%199))
+}
+func (rf *Raft) isVoteExpire() bool {
+	return time.Since(rf.lastTimeHeardFromMyTermLeader) > voteExpire
+}
+
+//State Management Section
+type stateLeaderCandidateFollower int
+
+const (
+	stateFollower  stateLeaderCandidateFollower = 0
+	stateCandidate stateLeaderCandidateFollower = 1
+	stateLeader    stateLeaderCandidateFollower = 2
+)
 
 // import "bytes"
 // import "../labgob"
@@ -69,12 +88,18 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	applyCh   chan ApplyMsg
-	hasLeader bool
-	term      int64 //term ME kept in logs
-	votedFor  int   //leader voted for in this term, -1 for NULL, self means is candidate
-	isLeader  bool
-	logs      []LogEntry //blank occupy index0, so start from 1
+
+	///*1.0 Refactoring New Entries*///
+	lastTimeHeardFromMyTermLeader time.Time
+	state                         stateLeaderCandidateFollower
+	applyCond                     *sync.Cond
+
+	applyCh chan ApplyMsg
+	//hasLeader bool
+	term     int64 //term ME kept in logs
+	votedFor int   //leader voted for in this term, -1 for NULL, self means is candidate
+	//isLeader bool
+	logs []LogEntry //blank occupy index0, so start from 1
 
 	//Volatile state on all servers:
 	commitIndex int64 //whole cluster's highest commit
@@ -86,7 +111,8 @@ type Raft struct {
 }
 
 func (rf *Raft) beLeader() {
-	rf.isLeader = true
+	//rf.isLeader = true
+	rf.state = stateLeader
 	for i := 0; i < len(rf.peers); i++ {
 		//for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 		rf.nextIndexMap[i] = rf.logs[len(rf.logs)-1].Index + 1
@@ -96,143 +122,167 @@ func (rf *Raft) beLeader() {
 	fmt.Printf("**I, %v become leader of Term %v\n", rf.me, rf.term)
 }
 
+//voteFor->-1,state->follower,term->argsTerm
 func (rf *Raft) beFollowerStepDownWithoutLeader(term int64) {
-	rf.isLeader = false
+	rf.state = stateFollower
 	rf.votedFor = -1
 	rf.term = term
 	fmt.Printf("I %v become follower at term %v\n", rf.me, term)
 }
 
-func (rf *Raft) applyAfterCommitChange() {
-	if rf.commitIndex > rf.lastApplied {
-		for now := rf.lastApplied + 1; now <= int64(Min(int(rf.commitIndex), int(rf.logs[len(rf.logs)-1].Index))); now++ { //全集群的commit可能大于本机log长度
-			commitMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[now].Cmd,
-				CommandIndex: int(now),
+/*
+It is not sufficient to simply have the function that
+applies things from your log between lastApplied and commitIndex stop when it reaches the end of your log.
+This is because you may have entries in your log that
+differ from the leader’s log after the entries that the leader sent you (which all match the ones in your log).
+Because #3 dictates that you only truncate your log if you have conflicting entries,
+those won’t be removed, and if leaderCommit is beyond the entries the leader sent you, you may apply incorrect entries.
+*/
+func (rf *Raft) needsApply() bool {
+	rf.GetMutex()
+	defer rf.ReleaseMutex()
+	return rf.commitIndex > rf.lastApplied && rf.lastApplied != int64(len(rf.logs))
+}
+func (rf *Raft) bkgApplyMessage() {
+	rf.applyCond.L.Lock()
+	defer rf.applyCond.L.Unlock()
+	for {
+		if rf.killed() {
+			return
+		} else {
+			for !rf.needsApply() {
+				rf.applyCond.Wait()
 			}
-			rf.applyCh <- commitMsg
-			rf.lastApplied = int64(commitMsg.CommandIndex)
+			rf.GetMutex()
+			rf.lastApplied += 1
+			toCommit := rf.logs[rf.lastApplied]
+			rf.ReleaseMutex()
+			rf.applyCh <- ApplyMsg{
+				Command:      toCommit.Cmd,
+				CommandValid: true,
+				CommandIndex: int(toCommit.Index),
+			}
 		}
 	}
+}
+
+//call me with mutex, I will release all mutex
+func (rf *Raft) doElection() {
+	rf.state = stateCandidate
+	rf.resetVoteExpireTONow()
+	rf.term++
+	rf.votedFor = rf.me
+	args := RequestVoteArgs{
+		Term:         rf.term,
+		Id:           rf.me,
+		LastLogIndex: rf.logs[len(rf.logs)-1].Index,
+		LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
+	}
+	//replys := make([]RequestVoteReply, len(rf.peers))
+	cntYes := 1
+	cntNo := 0
+	//var wg sync.WaitGroup
+	rf.ReleaseMutex()
+	startTime := time.Now().UnixMilli()
+
+	faceHighTerm := -1
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		tmp := i //classic bug, using iteration args with multithread
+		go func(i int) {
+			reply := RequestVoteReply{}
+			rf.sendRequestVote(i, &args, &reply)
+			fmt.Printf("I %v, get %v his RV reply %+v\n", rf.me, i, reply)
+			rf.GetMutex()
+			defer rf.ReleaseMutex()
+
+			//Drop the old RPC reply
+			if args.Term != rf.term {
+				return
+			}
+
+			if reply.VoteGranted {
+				cntYes += 1
+			} else if !reply.VoteGranted {
+				if reply.Term > rf.term {
+					faceHighTerm = int(reply.Term)
+					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
+				}
+				cntNo += 1
+			}
+		}(tmp)
+	}
+	//it should check that rf.currentTerm hasn't changed since the decision to become a candidate.
+
+	rf.GetMutex()
+	if faceHighTerm != -1 {
+		rf.ReleaseMutex()
+		return
+	}
+	rf.ReleaseMutex()
+
+	for {
+		time.Sleep(time.Millisecond * time.Duration(5))
+		rf.GetMutex()
+		//If AppendEntries RPC received from new leader: convert to follower
+		if rf.state != stateCandidate /*|| rf.votedFor != rf.me*/ {
+			rf.ReleaseMutex()
+			break
+		}
+		if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
+			rf.beLeader()
+			//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
+			rf.doHeartBeat()
+			rf.votedFor = -1
+			rf.ReleaseMutex()
+			break
+		}
+		if cntNo > len(rf.peers)/2 {
+			rf.votedFor = -1
+			rf.ReleaseMutex()
+			break
+		}
+		if time.Now().UnixMilli()-startTime > 50 {
+			rf.votedFor = -1
+			rf.ReleaseMutex()
+			break
+		}
+		rf.ReleaseMutex()
+	}
+	/*
+		rf.GetMutex()
+		if faceHighTerm != -1 {
+			rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
+		}
+		rf.ReleaseMutex()
+	*/
+	//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
 }
 
 func (rf *Raft) bkgRunningCheckVote() {
 	for { // test for starting leader vote
 		if rf.killed() {
-			//fmt.Printf("%v this is dead\n", rf.me)
-			//time.Sleep(time.Millisecond * time.Duration(5))
 			return
 		} else { //alive, examine whether receive hb from leader
-			//fmt.Printf("try lock %v ", rf.me)
+			time.Sleep(time.Millisecond * 10)
 			rf.GetMutex()
-			//fmt.Printf("lock %v!", rf.me)
-			if rf.isLeader {
+			//fmt.Printf("...%+v", rf.lastTimeHeardFromMyTermLeader.UnixMilli())
+			if rf.state == stateLeader || !rf.isVoteExpire() {
 				rf.ReleaseMutex()
-				//fmt.Printf("release lock %v as leader\n", rf.me)
-				time.Sleep(time.Second)
-				//fmt.Printf("I, %v, is a leader\n", rf.me)
 				continue
 			}
-			rf.hasLeader = false
-			rf.ReleaseMutex()
-			//fmt.Printf("release lock %v, reset my hasLeader!\n", rf.me)
-			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-			time.Sleep(time.Millisecond*time.Duration(voteExpire) + time.Millisecond*time.Duration(r.Int()%199))
+			// not leader && voteExpire
+			// be candidate, start to sendRequestVote
 
-			//fmt.Printf("Try %v...", rf.me)
-			rf.GetMutex()
-			//fmt.Printf("Ok %v!", rf.me)
-			if rf.hasLeader { //has get new leader OR has voted in this term
-				rf.ReleaseMutex()
-				continue
-			} else { //be candidate, start to sendRequestVote
+			//If AppendEntries RPC received from new leader: convert to follower
+			//If election timeout elapses: start new election
 
-				//todo
-				//If AppendEntries RPC received from new leader: convert to follower
-				//If election timeout elapses: start new election
-
-				fmt.Printf("I, %v, think there's no leader \n", rf.me)
-
-				rf.term++
-				rf.votedFor = rf.me
-				args := RequestVoteArgs{
-					Term:         rf.term,
-					Id:           rf.me,
-					LastLogIndex: rf.logs[len(rf.logs)-1].Index,
-					LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
-				}
-				//replys := make([]RequestVoteReply, len(rf.peers))
-				cntYes := 1
-				cntNo := 0
-				//var wg sync.WaitGroup
-				rf.ReleaseMutex()
-				startTime := time.Now().UnixMilli()
-
-				faceHighTerm := -1
-
-				for i := 0; i < len(rf.peers); i++ {
-					if i == rf.me {
-						continue
-					}
-					tmp := i //classic bug, using iteration args with multithread
-					go func(i int) {
-						reply := RequestVoteReply{}
-						rf.sendRequestVote(i, &args, &reply)
-						fmt.Printf("I %v, get %v his RV reply %+v\n", rf.me, i, reply)
-						rf.GetMutex()
-						defer rf.ReleaseMutex()
-						if reply.VoteGranted {
-							cntYes += 1
-						} else if !reply.VoteGranted {
-							if reply.Term > rf.term {
-								faceHighTerm = int(reply.Term)
-							}
-							cntNo += 1
-						}
-					}(tmp)
-				}
-				//it should check that rf.currentTerm hasn't changed since the decision to become a candidate.
-
-				for {
-					time.Sleep(time.Millisecond * time.Duration(5))
-					rf.GetMutex()
-					//If AppendEntries RPC received from new leader: convert to follower
-					if rf.hasLeader /*|| rf.votedFor != rf.me*/ {
-						rf.ReleaseMutex()
-						break
-					}
-					if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
-						rf.beLeader()
-						//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
-						rf.doHeartBeat()
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						break
-					}
-					if cntNo > len(rf.peers)/2 {
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						break
-					}
-					if time.Now().UnixMilli()-startTime > 50 {
-						rf.votedFor = -1
-						rf.ReleaseMutex()
-						break
-					}
-					rf.ReleaseMutex()
-				}
-				rf.GetMutex()
-				if faceHighTerm != -1 {
-					rf.beFollowerStepDownWithoutLeader(int64(faceHighTerm))
-					rf.ReleaseMutex()
-					continue
-				}
-				rf.ReleaseMutex()
-
-				//fmt.Printf("**I am %v, get %v votes, and %v noVotes, total is %v, sum less means expire!\n", rf.me, cntYes, cntNo, len(rf.peers))
-			}
+			fmt.Printf("I, %v, think there's no leader \n", rf.me)
+			rf.doElection()
 		}
 	}
 }
@@ -248,7 +298,7 @@ func Max(x, y int) int {
 
 //under mutex
 func (rf *Raft) doHeartBeat() {
-	if !rf.isLeader {
+	if rf.state != stateLeader {
 		return
 	}
 	for i := 0; i < len(rf.peers); i++ {
@@ -279,16 +329,18 @@ func (rf *Raft) bkgRunningAppendEntries() {
 		} else {
 			time.Sleep(time.Millisecond * time.Duration(100))
 			rf.GetMutex()
-			if rf.isLeader {
+			if rf.state == stateLeader {
 				//fmt.Printf("$$I, %v, is leader of term%v, mutex get for my AE!, consumes %v\n", rf.me, rf.term, time.Now().UnixNano()-ts)
 				//rf.doHeartBeat()
+				oldTerm := rf.term
+				fmt.Printf("$$I, %v, is leader of term%v, start my AE!\n", rf.me, rf.term)
 				rf.ReleaseMutex()
-				//fmt.Printf("$$I, %v, is leader of term%v, start my AE!\n", rf.me, rf.term)
 				//continue
 				//var wg sync.WaitGroup
 				//wg.Add(len(rf.peers) - 1)
 				cntDone := 0
-				faceHighTerm := -1
+				faceHighTerm := int64(-1)
+
 				for i := 0; i < len(rf.peers); i++ {
 					if i == rf.me {
 						continue
@@ -298,10 +350,13 @@ func (rf *Raft) bkgRunningAppendEntries() {
 					//Do replicate to server i
 					go func(i int) {
 						rf.GetMutex()
-						if !rf.isLeader {
+
+						//跟vote不一样，要抢锁构造args，后面的请求可能比第一个的reply来的慢，所以这里check一下不发req
+						if oldTerm != rf.term {
 							rf.ReleaseMutex()
 							return
 						}
+
 						var entries []LogEntry
 						//fmt.Printf("I %+v have log%+v, matchMap%+v,nextMap%+v\n", rf.me, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
 
@@ -315,42 +370,46 @@ func (rf *Raft) bkgRunningAppendEntries() {
 
 						args := AppendEntriesArgs{
 							LeaderID:     int64(rf.me),
-							LeaderTerm:   rf.term,
+							LeaderTerm:   oldTerm,
 							PrevLogIndex: prevLogIndex,
 							PrevLogTerm:  prevLogTerm,
 							Entries:      entries,
 							LeaderCommit: rf.commitIndex,
-							//below two didn't show on figure 2, I use them to check up-to-date
-							//LastLogIndex: rf.logs[len(rf.logs)-1].Index,
-							//LastLogTerm:  rf.logs[len(rf.logs)-1].Term,
 						}
 						reply := AppendEntriesReply{}
 						fmt.Printf("***[LEADER]I am %+v,to %+v,AE args is %+v, I have log%+v,matchIndexMap%+v,nextIndexMap%+v\n", rf.me, tmp, args, rf.logs, rf.matchIndexMap, rf.nextIndexMap)
 						rf.ReleaseMutex()
 						rf.sendAppendEntries(i, &args, &reply)
 
+						rf.GetMutex()
+						defer rf.ReleaseMutex()
+
+						//Drop the old RPC reply
+						if oldTerm != rf.term {
+							return
+						}
+
+						if reply.Term > rf.term {
+							faceHighTerm = reply.Term
+							rf.beFollowerStepDownWithoutLeader(faceHighTerm)
+							return
+						}
+
 						//fmt.Printf("%+v\n", len(args.Entries))
 						if reply.Success == 1 {
 							//If successful: update nextIndex and matchIndex for follower (§5.3)
-							rf.GetMutex()
 							if len(args.Entries) != 0 {
-								rf.matchIndexMap[i] = args.Entries[len(args.Entries)-1].Index
+								rf.matchIndexMap[i] = prevLogIndex + int64(len(args.Entries)) //args.Entries[len(args.Entries)-1].Index
 								rf.nextIndexMap[i] = rf.matchIndexMap[i] + 1
 							}
 							cntDone += 1
-							rf.ReleaseMutex()
 						} else {
 							//fmt.Printf("?,I %v got rej from %v,reason %v\n", rf.me, i, reply.Success)
-							rf.GetMutex()
-							if reply.Term > rf.term {
-								faceHighTerm = int(reply.Term)
-							}
 							cntDone += 1
 							//If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
 							if reply.Success == -1 {
-								rf.nextIndexMap[i] /= 2 //-= 1
+								rf.nextIndexMap[i] /= 2 //-= 1 ///= 2 //-= 1 观察到不连续重发会时间不够
 							}
-							rf.ReleaseMutex()
 						}
 					}(tmp)
 				}
@@ -408,7 +467,7 @@ func (rf *Raft) bkgRunningAppendEntries() {
 				if maxMatch > int(rf.commitIndex) && rf.term == int64(maxMatchTerm) {
 					rf.commitIndex = int64(maxMatch)
 					//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-					rf.applyAfterCommitChange()
+					rf.applyCond.Broadcast()
 				}
 
 				rf.ReleaseMutex()
@@ -446,7 +505,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.GetMutex()
 	//fmt.Printf("oh I am not to get %v\n", rf.me)
 	term = int(rf.term)
-	isleader = rf.isLeader
+	isleader = rf.state == stateLeader
 	rf.ReleaseMutex()
 	return term, isleader
 }
@@ -544,15 +603,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.term {
-		rf.term = args.Term
-		if rf.isLeader {
-			rf.beFollowerStepDownWithoutLeader(args.Term)
-		}
-		/*
-			if args.LastLogTerm > rf.logs[len(rf.logs)-1].Term || (args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex > rf.logs[len(rf.logs)-1].Index) {
-				rf.hasLeader = true //重置竞选计数器，不确定对不对(fix，可能要重置不up-to-date的，不希望他升term拖慢集群)
-			}
-		*/
+		rf.beFollowerStepDownWithoutLeader(args.Term)
 	}
 
 	//If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
@@ -569,8 +620,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.Id {
-		rf.hasLeader = true //重置竞选计数器
 		rf.votedFor = args.Id
+		rf.resetVoteExpireTONow() //重置竞选计数器
 		reply.VoteGranted = true
 		reply.Term = rf.term
 	} else {
@@ -591,34 +642,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	/*
-		if args.LastLogTerm < rf.logs[len(rf.logs)-1].Term {
-			reply.Success = 0
-			reply.Term = rf.term
-			fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
-			return
-		} else if args.LastLogTerm == rf.logs[len(rf.logs)-1].Term && args.LastLogIndex < rf.logs[len(rf.logs)-1].Index {
-			reply.Success = 0
-			reply.Term = rf.term
-			fmt.Printf("Pity, I %+v have term%+v, args is %+v\n", rf.me, rf.term, args)
-			return
-		}
-	*/
-
-	//heartBeat impact
-	if rf.isLeader {
+	//heartBeat impact，应该在匹配之前做
+	if rf.state == stateLeader {
 		fmt.Printf("!!!!!!!!!!!!!!!!!I %+v, hear from %+v, be follower, my log %+v, his log%+v\n", rf.me, args.LeaderID, rf.logs, args.Entries)
-		//fmt.Printf("XXXXX his lastLogTerm:%+v, my lastLogTerm%+v\n", args.LastLogTerm, rf.logs[len(rf.logs)-1].Term)
-		//fmt.Printf("YYYYY his lastlogIndex:%+v, my lastLogIndex%+v\n", args.LastLogIndex, rf.logs[len(rf.logs)-1].Index)
-		//rf.beFollowerStepDownWithLeader(args.LeaderTerm, args.LeaderID)
-		//rf.beFollowerStepDownWithoutLeader(args.LeaderTerm)
 	}
-	rf.isLeader = false
-	rf.hasLeader = true
-	rf.votedFor = -1
-	rf.term = args.LeaderTerm
-	reply.Success = 1
-	reply.Term = rf.term
+
+	rf.resetVoteExpireTONow()
+	rf.beFollowerStepDownWithoutLeader(args.LeaderTerm)
 
 	//Append Entries impact 1: update logs
 	findPrev := false
@@ -627,8 +657,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, log := range rf.logs {
 		if log.Index == args.PrevLogIndex && log.Term == args.PrevLogTerm { //冲突term的删掉
 			findPrev = true
-			rf.logs = rf.logs[:i+1]
-			rf.logs = append(rf.logs, args.Entries...)
+			for j, now := range args.Entries {
+				if i+j+1 == len(rf.logs) {
+					rf.logs = append(rf.logs, LogEntry{})
+				} else if rf.logs[i+j+1].Term != now.Term { //存在冲突，trim掉所有后面的log
+					rf.logs = rf.logs[:i+j+1]
+					rf.logs = append(rf.logs, LogEntry{})
+				}
+				rf.logs[i+j+1] = now
+			}
 			break
 		}
 	}
@@ -637,13 +674,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = -1
 		reply.Term = rf.term
 		return
+	} else {
+		reply.Success = 1
+		reply.Term = rf.term
 	}
 
 	//Append Entries impact 2: update my commitIndex to min (new,leader's)
 	if args.LeaderCommit > rf.commitIndex {
-		nxt := int64(Min(int(rf.logs[len(rf.logs)-1].Index), int(args.LeaderCommit)))
-		rf.commitIndex = nxt
-		rf.applyAfterCommitChange()
+		indexLastNewEntry := args.PrevLogIndex + int64(len(args.Entries))
+		//If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+		rf.commitIndex = int64(Min(int(indexLastNewEntry), int(args.LeaderCommit)))
+		rf.applyCond.Broadcast()
 	}
 	fmt.Printf("Follower, My commitIndex %v, findPrev%v\n", rf.commitIndex, findPrev)
 
@@ -718,7 +759,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.GetMutex()
 	index = len(rf.logs)
 	term = int(rf.term)
-	isLeader = rf.isLeader
+	isLeader = rf.state == stateLeader
 
 	if !isLeader {
 		rf.ReleaseMutex()
@@ -786,6 +827,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
 
+	//fmt.Printf("www\n")
+
+	/*1.0 New Entries*/
+	rf.state = stateFollower
+	rf.lastTimeHeardFromMyTermLeader = time.Now()
+	rf.applyCond = sync.NewCond(&sync.Mutex{})
+
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
@@ -793,6 +841,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.bkgRunningCheckVote()
 	go rf.bkgRunningAppendEntries()
+	go rf.bkgApplyMessage()
 
 	return rf
 }
