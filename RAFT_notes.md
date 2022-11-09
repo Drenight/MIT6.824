@@ -51,6 +51,57 @@ term和leader的映射关系？
 follower roll-back是什么机制？
 - each live follower deletes **tail of log** that **differs from leader**, copy leader's 'correct memory'
 
+Roll Back 一次1条log会非常耗时
+- 设想一台follower崩了重启，然后换了个leader
+  - 新leader需要从他的log尾一个RPC一条地往回匹配follower的空log
+- 我在lab的实现里是/=2，lec7里一个同学提到了binary search，跟这个差不多，都是发更多的log
+
+Fast Backup 快速备份
+- 让follower发送足够的信息，让leader回跳整个term
+
+### persist and volatile
+- Crash and reboot, 需不需要从磁盘加载的数据
+
+为啥不直接从空的服务器reboot？譬如这台机器遭遇磁盘损坏了，这种从0恢复到up-to-date的能力肯定是要有的
+- 因为依赖这种能力的前提，是整个集群不会同时shutdown，考虑同时断电。为了这种极端情况，我们最好还是能有个磁盘，长期持久化存储。
+
+persist哪些？
+- log
+- currentTerm
+- votedFor
+
+怎么确保写进磁盘？
+- fsync(fd)，让进程阻塞直到成功写入，只是调用write(fd,_)并不确保写进去
+
+写磁盘太慢了，每次更新log/currentTerm/votedFor都写不现实，怎么办？
+- 10ms级别的读写，要等磁盘转到合适的位置，远比一次RPC耗时长
+  - 每次都写磁盘的做法叫 Synchronous disk update
+    - 例如我手上电脑的文件系统，为了保全我的写入，都是synchronous disk update的
+- 可以把落盘，推迟到每次与外界交互
+  - 这就引入了batch一批client的请求，一起处理一起响应的优化，这样就不用一直写磁盘了
+
+Batch trick
+- 积累一堆client的请求，不响应直到这一批都处理完
+  - reply意味着promise to commit
+ 
+why不存比如lastApplied?
+- 机器reboot，从leader/followers那里得知集群的commitIndex，replay log里该commit的就行
+- 一个缺陷是这样非常慢，这也就引出了下一个topic，log compaction
+
+快照
+- 绑定一个logIndex作为版本号，之前的log就不需要了
+  - 如果有follower的log断在这个index之前怎么办？
+     1. leader根据nextIndexMap永不删除全有的？
+        - 不太好，有个follower挂一周，你就一周不能做快照
+     2. Install Snapshot RPC, AE发现找到log头了，发送自己的最新快照和自己的log
+- 生成快照的功能是APP做的，raft在需要的时候会去调用，因为只有应用（那个key-value服务）理解他的表是什么意思
+- 收到的快照可能是个stale的，install得小心
+
+Linearizeability
+- 线性一致（严格一致，原子一致），整个集群运作就像一台，永远不crash的机器，很强的一致性
+- 定义：execution history is liniable if $\exists$ order of OPs that matches REAL for NON-CONCURRENCY. Each read sees MOST recent write.
+- 读不该读到stale数据
+
 # 1 Introduction
 Consus algorithms: allow a collection of machines to work as a coherent group that can survive the failures of some of its members
 
@@ -232,3 +283,80 @@ Raft handles these failures by retrying indefinitely, since Raft RPCs are idempo
 
 ## 5.6 Timing and availability
 > safety must not depend on timing. System must not produce incorrect results just because some event happens more quickly or slowly than expected
+
+# 7 Log compaction
+Long log consumes $\rightarrow$ snapshot compact
+- time to replay
+- storage space
+
+why not create snapshot only by leader & send to follower?
+- two disadvantages:
+  1. network bandwidth waste, slow snapshotting process
+      - follower has enough knowledge to build its own snapshot
+  2. make leader's implementation complex, busy with sending info
+
+Snapshot Frequency?
+- Fast: waste disk bandwidth and energy
+- Slow: risk exhausting storage capacity & replay time grows
+- Advice: a fixed bytes limit
+  - if significantly > expected size of snapshot:
+    - disk bandwidth for snapshotting will be small
+
+# 8 Client interaction
+- Talk about issues apply to all consensus-based system:
+  - How client find cluster's leader?
+  - How Raft supports linearizable semantics?
+
+How client find cluster's leader?
+- Talk to random server, that server will guide to the leader
+
+What's linearizable semantics?
+- every operation appears to execute instantaneously, exactly once.
+- no stale reply!
+
+How to make sure every operation run exactly once?
+- When will run twice or more? Example?
+   > for example, if the leader
+   crashes after committing the log entry but before responding to the client, the client will retry the command with a new leader, causing it to be executed a second time.
+  - Solution?
+      >  The solution is for clients to assign unique serial numbers to every command. Then, the state machine tracks the latest
+      serial number processed for each client, along with the associated response. If it receives a command whose serial
+      number has already been executed, it responds immediately without re-executing the request.
+
+- Contact stale leader, read returns stale result, how to solve?
+   1. >First, a leader must have the latest information on
+   which entries are committed. The Leader Completeness
+   Property guarantees that a leader has all committed entries, but at the start of its term, it may not know which
+   those are. To find out, it needs to commit an entry from
+   its term. Raft handles this by having each leader commit a blank no-op entry into the log at the start of its
+   term. 
+   2. > Second, a leader must check whether it has been deposed before processing a read-only request (its information may be stale if a more recent leader has been elected).
+   Raft handles this by having the leader exchange heartbeat messages with a majority of the cluster before responding to read-only requests.
+
+A better explaination of why using blank op
+> The no-op text at the end of Section 8 is talking about an optimization
+in which the leader executes and answers read-only commands (e.g.
+get("k1")) without committing those commands in the log. For example,
+for get("k1"), the leader just looks up "k1" in its key/value table and
+sends the result back to the client. If the leader has just started, it
+may have at the end of its log a put("k1", "v99"). Should the leader
+send "v99" back to the client, or the value in the leader's key/value
+table? At first, the leader doesn't know whether that v99 log entry is
+committed (and must be returned to the client) or not committed (and
+must not be sent back). So (if you are using this optimization) a new
+Raft leader first tries to commit a no-op to the log; if the commit
+succeeds (i.e. the leader doesn't crash), then the leader knows
+everything before that point is committed.
+
+# 9 Implementation and evaluation
+- Three topic to evaluate Raft
+
+TLA+ specification language
+
+## 9.3 Performance
+- most important: replicating new log entries
+
+# 10 Related work
+
+# 11 Conclusion
+- Challange Paxos's understandability
