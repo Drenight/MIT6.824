@@ -1,3 +1,57 @@
+# Lec 8
+It's ok for reply of resended request to be as stale as the time point when initial request was sent.(30:00)
+
+Why ZK?
+1. API general-purpose coordination service
+2. Nx servers$\rightarrow$? Nx performance
+
+Why ZK Problem 2
+- ZK model?
+  - hundreds of clients
+  - ZK is a layer running on top of ZAB
+  - ZAB works just like RAFT, maintaing a log, and atomiclly broadcast, majority...
+
+- In real world, a huge number of workloads are read heavy
+  - Maybe we can send "write" to leader, and just send "read" to followers!
+    - That will make huge progress for Nx servers Nx performance
+    - Actually, ZK cluster's read performance increase dramatically as you add more machines 
+    - **Key problem: can't believe any replica except leader to be up2date**
+
+- If we want to build a linearizable system, we can not rely on this may not be up2date
+
+- How ZooKeeper deal with this not up2date?
+  - ZK not obliged to provide fresh data to read, it's legal to return stale read result
+  - A classic solution trade-off High Performance and Strong Consistency, give up "strong"
+  - Here comes the question, why you think "permit to read stale" can still produce a useful system?
+
+ZK Guarantees?
+1. LINEARIZEABLE WRITES
+   - Even clients might submit writes concurrently, system behave as if it excutes writes ONE AT A TIME, in SOME ORDER, obey real-time ordeing
+2. FIFO CLIENT ORDER
+   - For any given client, its operations execute in his specified order
+     - write: clear client-specified order
+       - client is allowed to launch **asynchronous** sequence of writes without waiting for any of them to complete
+       - the professor guess: the clie nt actually stamps writes with numbers increasing: "this one first, this one second..."
+     - read: all read obey **monotonic consistency**
+       - every read reflects some exact time point's replica's kv looks like
+       - the successive reads have to observe at some point **don't go backwards**
+       - After crash client reconnect whole service, connect only to newer followers / first chosen server will keep stuck until it get up2date, paper didn't mention.
+         - Using **ZXID** of preceding log entry
+   - This FIFO feature implies read-after-write consistency
+     - Because the server you read will stall until it commit previous write
+     - TODO still wait-free, cause client request is async
+
+✨✨✨Here comes the interesing point: Why guarantee can't prevent stale read?
+- These two guarantee is **ONLY FOR SINGLE CLIENT HIMSELF**
+- If client $A$ writes, $B$'s read won't be guaranteed read that write 
+
+✨✨✨Sync operation?
+- essentially a write operation, makes its way through the system as if it were a write
+- finally showing up in the logs of the replica client is talking to
+- tell the replica don't serve this read until you have seen my last sync
+
+exists(ready, watch=true)
+
 [kafka replace zk with raft, why?](https://www.confluent.io/blog/why-replace-zookeeper-with-kafka-raft-the-log-of-all-logs/)
 - TODO, system rely on system $\rightarrow$ system rely on inner algorithm?
 
@@ -167,30 +221,29 @@ Stronger primitives?
 5. Simple loscks without herd effect
    - Line up all the clients requesting the lock, each client obtains the lock in order of request arrival
    - use SEQUENTAIL to order client's attempt
-        ```
-        Lock
-        1 n = create(l + “/lock-”, EPHEMERAL|SEQUENTIAL)
-        2 C = getChildren(l, false)
-        3 if n is lowest znode in C, exit
-        4 p = znode in C ordered just before n
-        5 if exists(p, true) wait for watch event
-        6 goto 2
-        Unlock
-        1 delete(n)
-        ```
+      ```
+      Lock
+      1 n = create(l + “/lock-”, EPHEMERAL|SEQUENTIAL)
+      2 C = getChildren(l, false)
+      3 if n is lowest znode in C, exit
+      4 p = znode in C ordered just before n
+      5 if exists(p, true) wait for watch event
+      6 goto 2
+      Unlock
+      1 delete(n)
+      ```
 
    - Example graph of lock without herd (I guess like this)
      
-   ``` 
-    znode l "/p"(SEQ=37)
-        |--- znode child1 "/p/lock1022" (SEQ=1022), hold lock
-        |--- znode child2 "/p/lock1033" (SEQ=1033), watch child1
-        |--- znode child3 "/p/lock1095" (SEQ=1095), watch child2   
+    ``` 
+      znode l "/p"(SEQ=37)
+          |--- znode child1 "/p/lock1022" (SEQ=1022), hold lock
+          |--- znode child2 "/p/lock1033" (SEQ=1033), watch child1
+          |--- znode child3 "/p/lock1095" (SEQ=1095), watch child2   
 
-    ```
+      ```
 
     - client only watch znode precedes his znode, hence only awake one process
-
 
 6. Read/Write Locks
     ```
@@ -207,13 +260,11 @@ Stronger primitives?
         - write client watch precdent every lock   
     - all read client "herd"?
         - we need this effect, they all permit now
-
 7. Double Barrier
     - enable client sync beginning and end of a computation
     - wait enough(over barrier threshold) processed join barrier, processes start, leave the barrier once all processes have finished
 
 # 3 ZooKeeper Applications
-
 # 4 ZooKeeper Implementation
 
 ZK workflow?
@@ -223,15 +274,112 @@ ZK workflow?
 4. server commit change to ZooKeeper database, fully replicated across all servers of the ensemble
 5. In case of read, just read local database
 
-## 4.1 Request Processor
-
-
 ZK's DB?
 - in-memoery
-- each stores maximum 1MB data by default
+- each znode stores maximum 1MB data by default
+
+## 4.1 Request Processor
+
+Will local replicas diverge?
+- Since messaging layer is atomic, local replicas are guaranteed never diverge
+
+Transactions are said to be idempotent, which means redundant message of leader's transactions are safe, how it is implemented?
+- When leader receives a write request, it calculates what the state of the system will be(TODO, detail), when the write is applied and transforms it into a transaction that captures this new state.
+- Future state must be calculated because there may be outstanding transactions havent yet applied to the DB
+- e.g. client does a conditional ```setData```, the version number in request matches the **future** version number of the znode being updated, the service generates a ```setDataTXN``` contains the new data, the new version number, updated time stamps; 
+  - Else like mismatch of version number, generate an ```errorTXN```
+
+## 4.2 Atomic Broadcast
+Request flow?
+- All requests that **update**(TODO ps: Read is in local replica/nearest followers) ZooKeeper state are forwarded to the leader.
+- Leader executes the request and broadcast the change to the ZooKeeper state through ```Zab```, an atomic broadcast protocol.
+- Server responds to the client, when it delivers the corresponding state change.
+
+Zab?
+- simple majority quorums on a proposal
+- work with majority of servers survive
+
+Request processing pipeline?
+- To achieve high throughput, ZK tries to keep it full
+- May have thousands of requests in different parts of the processing pipeline(TODO pipeline unit != one request? )
+- Because state changes depend on previous state changes, Zab provides **stronger order guarantees** than regular atomic broadcast
+  - order guarantee
+  - all changes from previous leaders are delivered to an established leader before it broadcasts its won changes
+
+Implement?
+- Order: use TCP for transport, so meassage order is maintained by the network
+- Leader Chosen: use Zab, who creates the transactions also proposes them
+- Use log to keep track of proposals as the write-ahead log for the in-memory database, so that we do not have to write messages twice to disk(TODO understand write twice)
+
+Zab doesn't maintain id of delivered message, not like raft's commitedIndex, so may deliver same message twice
+- It's ok, since we use **idempotent** transactions, multiple delivery is acceptable, as long as in order
+  - In fact, ZK use this feature when leader restart
+    - ZK requires Zab to **redeliver** at least all messages that were delivered after the start of the last snapshot
+
+## 4.3 Replicated Database
+
+Replicas replicate what?
+- Each replica has a copy in memory of the ZK state
+- When a ZK server recovers from a crash, it needs to recover this internal state, replaying all delivered messages since the **start** of the snapshot
+  - **start** is extremly IMPORTANT, since it combine a correct logic for later fuzzy snapshot
+
+Fuzzy snapshot?
+- We **do not lock ZK state to take the snapshot**
+- We do DFS of the tree atomically reading each znode's data and meta-data and writing them to disk
+  - Therefore our fuzzy snapshot may not match any real-time snapshot of the tree
+    - newer sons and outdated parents? I guess
+    - Snapshot generation reading on top nodes is paralled with updates on bottom nodes? I guess
+- Here's where idempotent helps, all state changes including those during generation of fuzzy snapshot will be replayed
+  - **Then the fuzzy snapshot's old-version nodes will be updated correctly**
+
+## 4.4 Client-Server Interactions
+
+How watch triggers from leader to client?
+- I guess,server receives client's request$\rightarrow$ forward to leader $\rightarrow$ leader convert it to transaction and broadcast $\rightarrow$ all servers do that transactions, some one who connect to a client with "watch" locally stored will notify client
+- When a server processes a write request, it also sends out and clears notifications relative to any watch that corresponds to that update.
+  - I guess here "request" shall be "transaction"? Cause 
+    - >All requests that **update**(TODO ps: Read is in local replica/nearest followers) ZooKeeper state are forwarded to the leader.
+- Servers process writes in order(NO CONCURRENCY), so guarantee strict succession of notifications
+- server handle notifications locally
+  - only the server connecting with a client, tracks and tirggers notifications for that client
+  - TODO: I guess, other followers receive leader's notification generated by watch will just ignore that?
+    - ANSWER: Look below, watch is stored locally, therefore triggerd locally. Leader just simply broadcast an update, it's follower who find it trigger a watch
+  
+  When a client may miss a watch notification?
+  - >Watches are maintained locally at the ZooKeeper server to which the client is connected. This allows watches to be light weight to set, maintain, and dispatch. When a client connects to a new server, the watch will be triggered for any session events.
+  - >When you disconnect from a server (for example, when the server fails), you will not get any watches until the connection is reestablished. For this reason session events are sent to all outstanding watch handlers. Use session events to go into a safe mode: you will not be receiving events while disconnected, so your process should act conservatively in that mode.
+  - >When a client reconnects, any previously registered watches will be reregistered and triggered if needed.
+
+How the ZooKeeper deal with simple "READ"?
+- Handled locally at each server
+
+What's "Fast Read", will it lose consistency, getting stale results?
+- The bare read itself is called "fast read", it's just memory actions so that's why ZooKeeper is fast in read-dominant situation
+- Actually, it will lose consistency, you may get stale return result if you don't use $sync$(see below)
+  - I think, Remember ZooKeeper is based on connection? The client will always see result generated by a same server, so the result will have Monotonic consistency
+  - what we may have problem is only we may get stale results, but that result is still monotonic growing at least
+
+How read requests are dealed by followers(who directly connected to clients), without loss of consistency?
+- Depends whether your production needs precedence order, we can make some modify on READ
+- Every read requests is processed and tagged with a $zxid$
+  - $zxid$ corresponds to the last transaction seen by that server
+- use ```sync```
+
+What's ```sync```
+- [Tradeoff between up2date & high performance, decided by user](https://stackoverflow.com/questions/5420087/apache-zookeeper-how-do-writes-work)
+- it's asynchronous, ordered by the leader after all pending writes to its(TODO leader's?) local replica
+- To make sure a ```read``` returns the latest updated value, a client calls ```sync``` followed by the ```read``` operation
+- Enable any update, before sync, reflected to the ```read```
+
+What will happen if client reconnect with another server?
+- new server must be as up-to-date as the old server
+- new server will check client's last $zxid$ and its self's $zxid$
+- If new server is more stale, it won't reestablish the session until it has caught up
+- Client is guaranteed to find another server as up2date, because of majority
 
 # 5 Evaluation
 
 # 6 Related work
 
 # 7 Conclustions
+
