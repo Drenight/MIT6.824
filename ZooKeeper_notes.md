@@ -55,6 +55,33 @@ exists(ready, watch=true)
 [kafka replace zk with raft, why?](https://www.confluent.io/blog/why-replace-zookeeper-with-kafka-raft-the-log-of-all-logs/)
 - TODO, system rely on system $\rightarrow$ system rely on inner algorithm?
 
+## More about ZK
+
+Motivation
+- Test-and-Set VMFT needed
+- publish dynamic configuration
+
+How we do increment?
+```c
+While true{
+  x,v = GETDATA("f");
+  if(SET("f",x+1,v)){
+    break;
+  }
+}
+```
+- leader will return false if version != v 
+
+ZK's lock and go thread's lock?
+- ZK's lock itself doesn't guarantee atomicity
+  - previous holder may crash, in GO there's no notion of threads failing
+    - Actually GO's thread may fail, action like divide 0, professor adviced to kill the broken program, cuz lock is not safe any more
+      - it will be very hard to play the game like setting a "ready" flag to recover from a crash of a thread
+  - every one should be prepared to clean up from some previous disaster write
+- Recall my MAPREDUCE implement, master mark the job locked cause it's assigned to a worker, if long time passed master will release that lock and let other worker reexecute the job.
+  - Previous worker only write the intermediate temporary file before job done, so it implies "CLEAN UP"
+  - This lock is called "SOFT LOCK"
+
 # Abstract
 What function?
 - A service for coordinating process of distributed applications.
@@ -110,6 +137,8 @@ ZK provides its clients the abstraction of a set of data nodes(znodes), organize
 Types of znode?
 1. Regular: client create&delete
 2. Ephemeral: client create, can be del by system automatically when session terminate
+   - When system believe client died 
+3. SEQ, appended with a number by ZK, which is never repeated
 
 Sequential flag?
 - father's is smaller than son's
@@ -138,6 +167,7 @@ ZK ensemble, hence persist across ZK servers.
 
 - ```create(path, data, flags)```: Creates a znode with pathname ```path```, stores ```data```, return the name of the new znode.
   - ```flags``` enable a client to select the type of znode: regular, ephermeral and the sequential flag
+  - They are all EXCLUSIVE, return "NO" if exists
 - ```delete(path, version)```: Delets the znode```path```, if the znode is at the expected ```version```
 - ```exists(path, watch)```
 - ```getData(path, watch)```
@@ -215,6 +245,7 @@ Stronger primitives?
     1. "herd", What's herd?
         - 惊群
         - Massive clients will be triggered
+        - Non-scalable lock
     2. Only implementing EXCLUSIVE locking
         - reads can't not parallel
 
