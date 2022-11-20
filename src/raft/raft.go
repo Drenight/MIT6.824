@@ -18,17 +18,20 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
 //Time Management Section
-const voteExpire = 300 * time.Millisecond
+const voteExpire = 800 * time.Millisecond
 const heartBeatInterval = 100 * time.Millisecond
 
 func (rf *Raft) resetVoteExpireTONow() {
@@ -118,15 +121,19 @@ func (rf *Raft) beLeader() {
 		rf.nextIndexMap[i] = rf.logs[len(rf.logs)-1].Index + 1
 		//for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 		rf.matchIndexMap[i] = 0
+		if rf.nextIndexMap[i] == 0 {
+			fmt.Printf("QAQ??? %+v\n", i)
+		}
 	}
 	fmt.Printf("**I, %v become leader of Term %v\n", rf.me, rf.term)
 }
 
-//voteFor->-1,state->follower,term->argsTerm
+//voteFor->-1,state->follower,term->argsTerm, Persist
 func (rf *Raft) beFollowerStepDownWithoutLeader(term int64) {
 	rf.state = stateFollower
 	rf.votedFor = -1
 	rf.term = term
+	rf.persist()
 	fmt.Printf("I %v become follower at term %v\n", rf.me, term)
 }
 
@@ -172,6 +179,9 @@ func (rf *Raft) doElection() {
 	rf.resetVoteExpireTONow()
 	rf.term++
 	rf.votedFor = rf.me
+
+	rf.persist()
+
 	args := RequestVoteArgs{
 		Term:         rf.term,
 		Id:           rf.me,
@@ -183,7 +193,7 @@ func (rf *Raft) doElection() {
 	cntNo := 0
 	//var wg sync.WaitGroup
 	rf.ReleaseMutex()
-	startTime := time.Now().UnixMilli()
+	//startTime := time.Now().UnixMilli()
 
 	faceHighTerm := -1
 
@@ -200,12 +210,18 @@ func (rf *Raft) doElection() {
 			defer rf.ReleaseMutex()
 
 			//Drop the old RPC reply
-			if args.Term != rf.term {
+			if args.Term != rf.term || rf.state != stateCandidate {
 				return
 			}
 
 			if reply.VoteGranted {
 				cntYes += 1
+				if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
+					rf.beLeader()
+					//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
+					rf.doHeartBeat()
+					//rf.votedFor = -1
+				}
 			} else if !reply.VoteGranted {
 				if reply.Term > rf.term {
 					faceHighTerm = int(reply.Term)
@@ -217,41 +233,45 @@ func (rf *Raft) doElection() {
 	}
 	//it should check that rf.currentTerm hasn't changed since the decision to become a candidate.
 
-	rf.GetMutex()
-	if faceHighTerm != -1 {
-		rf.ReleaseMutex()
-		return
-	}
-	rf.ReleaseMutex()
-
-	for {
-		time.Sleep(time.Millisecond * time.Duration(5))
+	/*
 		rf.GetMutex()
-		//If AppendEntries RPC received from new leader: convert to follower
-		if rf.state != stateCandidate /*|| rf.votedFor != rf.me*/ {
+		if faceHighTerm != -1 {
 			rf.ReleaseMutex()
-			break
-		}
-		if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
-			rf.beLeader()
-			//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
-			rf.doHeartBeat()
-			rf.votedFor = -1
-			rf.ReleaseMutex()
-			break
-		}
-		if cntNo > len(rf.peers)/2 {
-			rf.votedFor = -1
-			rf.ReleaseMutex()
-			break
-		}
-		if time.Now().UnixMilli()-startTime > 50 {
-			rf.votedFor = -1
-			rf.ReleaseMutex()
-			break
+			return
 		}
 		rf.ReleaseMutex()
-	}
+
+		for {
+			time.Sleep(time.Millisecond * time.Duration(5))
+			rf.GetMutex()
+			//If AppendEntries RPC received from new leader: convert to follower
+			if rf.state != stateCandidate {
+				rf.ReleaseMutex()
+				break
+			}
+			if cntYes > len(rf.peers)/2 && rf.votedFor == rf.me { //odd
+				rf.beLeader()
+				//Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
+				rf.doHeartBeat()
+				//rf.votedFor = -1
+				rf.ReleaseMutex()
+				break
+			}
+			if cntNo > len(rf.peers)/2 {
+				//rf.votedFor = -1
+				rf.resetVoteExpireTONow()
+				rf.ReleaseMutex()
+				break
+			}
+			if time.Now().UnixMilli()-startTime > 50 {
+				//rf.votedFor = -1
+				rf.resetVoteExpireTONow()
+				rf.ReleaseMutex()
+				break
+			}
+			rf.ReleaseMutex()
+		}
+	*/
 	/*
 		rf.GetMutex()
 		if faceHighTerm != -1 {
@@ -352,7 +372,7 @@ func (rf *Raft) bkgRunningAppendEntries() {
 						rf.GetMutex()
 
 						//跟vote不一样，要抢锁构造args，后面的请求可能比第一个的reply来的慢，所以这里check一下不发req
-						if oldTerm != rf.term {
+						if oldTerm != rf.term || rf.state != stateLeader {
 							rf.ReleaseMutex()
 							return
 						}
@@ -365,6 +385,12 @@ func (rf *Raft) bkgRunningAppendEntries() {
 							entries = append(entries, rf.logs[rf.nextIndexMap[i]:]...)
 						}
 						//和上一个必须解耦，有可能没有新log，但需要删掉follower的内容
+
+						if rf.nextIndexMap[i] == 0 {
+							fmt.Printf("QAQ2 %+v, I am %+v, my log now is %+v \n", i, rf.me, rf.logs)
+							fmt.Printf("QAQ2 %+v, my nextIndexMap is like %+v\n", rf.me, rf.nextIndexMap)
+						}
+
 						prevLogIndex := rf.logs[rf.nextIndexMap[i]-1].Index //也感觉不是rf.matchIndexMap[i] //感觉不是rf.logs[len(rf.logs)-2].Index //本轮失配，只是sub一下nextmap，交给下一轮，不尝试一轮内同步，怕和后一轮冲突
 						prevLogTerm := rf.logs[rf.nextIndexMap[i]-1 /*prevLogIndex*/].Term
 
@@ -408,7 +434,11 @@ func (rf *Raft) bkgRunningAppendEntries() {
 							cntDone += 1
 							//If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
 							if reply.Success == -1 {
-								rf.nextIndexMap[i] /= 2 //-= 1 ///= 2 //-= 1 观察到不连续重发会时间不够
+								rf.nextIndexMap[i] = int64(math.Sqrt(float64(rf.nextIndexMap[i]))) ///= 2 //-= 1 ///= 2 //-= 1 观察到不连续重发会时间不够
+								if rf.nextIndexMap[i] == 0 {
+									rf.nextIndexMap[i] = 1
+									fmt.Printf("QAQ WARNING!!! We didn't match Index%+v Term%+v\n", prevLogIndex, prevLogTerm)
+								}
 							}
 						}
 					}(tmp)
@@ -441,34 +471,68 @@ func (rf *Raft) bkgRunningAppendEntries() {
 
 				//If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
 				maxMatch := -1
-				maxMatchTerm := -1
-				lb := 0
-				rb := len(rf.logs) - 1
-				for lb <= rb {
-					mid := (lb + rb) / 2
-					tstCounter := 1 //自己
-					for it, _ := range rf.peers {
-						if it == rf.me {
+				//maxMatchTerm := -1
+				/*
+					lb := 0
+					rb := len(rf.logs) - 1
+					for lb <= rb {
+						mid := (lb + rb) / 2
+						tstCounter := 1 //自己
+						for it, _ := range rf.peers {
+							if it == rf.me {
+								continue
+							}
+							if rf.matchIndexMap[it] >= int64(mid) {
+								tstCounter += 1
+							}
+						}
+						if tstCounter > len(rf.peers)/2 {
+							maxMatch = Max(maxMatch, mid)
+							maxMatchTerm = int(rf.logs[mid].Term)
+							lb = mid + 1
+						} else {
+							rb = mid - 1
+						}
+					}
+					//and log[N].term == currentTerm (Low term can not be committed independently)
+					if maxMatch > int(rf.commitIndex) && rf.term == int64(maxMatchTerm) {
+						rf.commitIndex = int64(maxMatch)
+						//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
+						rf.applyCond.Broadcast()
+					}
+				*/
+				go func() {
+					rf.GetMutex()
+					for i := len(rf.logs) - 1; i >= 0; i-- {
+						log := rf.logs[i]
+						if log.Term != rf.term {
 							continue
 						}
-						if rf.matchIndexMap[it] >= int64(mid) {
-							tstCounter += 1
+						if log.Index < rf.commitIndex {
+							break
+						}
+						cnt := 1
+						for j := 0; j < len(rf.peers); j++ {
+							if j == rf.me {
+								continue
+							}
+							if rf.matchIndexMap[j] >= int64(i) {
+								cnt++
+							}
+						}
+						if cnt > len(rf.peers)/2 {
+							maxMatch = i
+							break
 						}
 					}
-					if tstCounter > len(rf.peers)/2 {
-						maxMatch = Max(maxMatch, mid)
-						maxMatchTerm = int(rf.logs[mid].Term)
-						lb = mid + 1
-					} else {
-						rb = mid - 1
+					if maxMatch != -1 {
+						if maxMatch > int(rf.commitIndex) {
+							rf.commitIndex = int64(maxMatch)
+							rf.applyCond.Broadcast()
+						}
 					}
-				}
-				//and log[N].term == currentTerm (Low term can not be committed independently)
-				if maxMatch > int(rf.commitIndex) && rf.term == int64(maxMatchTerm) {
-					rf.commitIndex = int64(maxMatch)
-					//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-					rf.applyCond.Broadcast()
-				}
+					rf.ReleaseMutex()
+				}()
 
 				rf.ReleaseMutex()
 				//fmt.Printf("\n_______%+v, has commitIndex %v\n", rf.me, rf.commitIndex)
@@ -524,6 +588,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.term)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -546,6 +617,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int64
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		fmt.Printf("decode error\n")
+	} else {
+		rf.term = term
+		rf.votedFor = votedFor
+		rf.logs = logs
+	}
+	fmt.Printf("READ PERSIST %+v ,term%+v votedFor%+v logs%+v\n", rf.me, term, votedFor, logs)
 }
 
 //
@@ -620,10 +704,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == -1 || rf.votedFor == args.Id {
+		fmt.Printf("rv agree, I am %+v, vote%v, votedFor %+v, term is %+v\n", rf.me, args.Id, rf.votedFor, rf.term)
 		rf.votedFor = args.Id
 		rf.resetVoteExpireTONow() //重置竞选计数器
 		reply.VoteGranted = true
 		reply.Term = rf.term
+		fmt.Printf("rv agree, I am %+v, now my votedFor is %+v\n", rf.me, args.Id)
+		rf.persist()
+
 	} else {
 		reply.VoteGranted = false
 		reply.Term = rf.term
@@ -648,7 +736,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.resetVoteExpireTONow()
-	rf.beFollowerStepDownWithoutLeader(args.LeaderTerm)
+	if rf.state != stateFollower {
+		rf.beFollowerStepDownWithoutLeader(args.LeaderTerm)
+	} else {
+		rf.term = args.LeaderTerm
+	}
 
 	//Append Entries impact 1: update logs
 	findPrev := false
@@ -670,7 +762,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	rf.persist()
+
 	if !findPrev {
+		fmt.Printf("---%v---Cnt Match %v, My log %+v\n", rf.me, args.LeaderID, rf.logs)
 		reply.Success = -1
 		reply.Term = rf.term
 		return
@@ -686,7 +781,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = int64(Min(int(indexLastNewEntry), int(args.LeaderCommit)))
 		rf.applyCond.Broadcast()
 	}
-	fmt.Printf("Follower, My commitIndex %v, findPrev%v\n", rf.commitIndex, findPrev)
+	fmt.Printf("Follower %+v leader's %+v, My commitIndex %v, findPrev%v\n", rf.me, args.LeaderID, rf.commitIndex, findPrev)
 
 	//fmt.Printf("I,%+v, has log:%+v, I receive %+v\n", rf.me, rf.logs, args)
 }
@@ -772,7 +867,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index: int64(len(rf.logs)),
 	}
 	rf.logs = append(rf.logs, log)
-
+	rf.persist()
 	fmt.Printf("Receive input log: id%v, now log%+v\n", rf.me, rf.logs)
 
 	rf.ReleaseMutex()
@@ -825,8 +920,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 
 	rf.votedFor = -1
-	rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
-
+	//rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
 	//fmt.Printf("www\n")
 
 	/*1.0 New Entries*/
@@ -838,6 +932,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	if len(rf.logs) == 0 {
+		rf.logs = append(rf.logs, LogEntry{nil, 0, 0})
+	}
 
 	go rf.bkgRunningCheckVote()
 	go rf.bkgRunningAppendEntries()
