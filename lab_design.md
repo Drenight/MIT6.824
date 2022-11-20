@@ -177,3 +177,12 @@ lab2需要实现：
   - 这个估计之后会改，折半发太多了，不过如果真想1248得记录一些字段来实现
 - Lecture7讲的做法：每次回退一整个term
 
+## 2C
+修正了follower在AppendEntries仍然清掉votedFor的问题
+- 如果清掉会导致同一个term产生多个leader
+
+
+Unreliable那边的测试会爆问题
+- 修改了majority的逻辑，怀疑之前的O(log(n))二分有问题，现在是O(n)的
+  - 可能会拉低AE频率，准备优化下这边
+- 目前是把log下降从```/=2``` 变成 ```=sqrt```
