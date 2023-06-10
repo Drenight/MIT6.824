@@ -192,6 +192,34 @@ Unreliable那边的测试会爆问题
 - 整个项目搬出GOPATH了，向gomod兼容吧
 - 这个项目本身没有go.mod，一旦创建了就会不支持../这样的import，不知道MIT新的代码是不是翻新了，还是忍着假阳性写代码
   - 又或是我哪里理解错了
+  - check过了，22版的把所有../的引用全换成6.824/了，也有go.mod，羡慕死了，要怪就怪自己拖太久了吧
 - goland甚至直接不让../哪怕我没创建go.mod
 
 ## 3A
+整理下raft与kv的交互
+> as each Raft peer becomes aware that successive log entries are
+  committed, the peer should send an ApplyMsg to the service (or
+  tester) on the same server, via the applyCh passed to Make(). set
+  CommandValid to true to indicate that the ApplyMsg contains a newly
+  committed log entry.
+  
+> in Lab 3 you'll want to send other kinds of messages (e.g.,
+  snapshots) on the applyCh; at that point you can add fields to
+  ApplyMsg, but set CommandValid to false for these other uses.
+
+1. 每个kvsrv 有个 Raft peer
+2. Clerk把put/app/get RPC发给leader Raft绑定到的kvsrv
+3. kvsrv把put/app/get下传给raft, raft集群维护3op的log
+4. 所有kvsrv执行底层raft的3oplog
+    - 这里要起一个线程估计，监听raft的applyMsg
+5. kvsrv commit了一个op，需要响应clerk的RPC汇报结果
+
+上面是给的提示，下面是一些自己的想法
+1. 每个kvsrv开一个线程监听applyMsg Chan
+2. sync.Cond
+   - Done 目前正在尝试replace掉raft的cond改用chan，因为[官方文档](https://pkg.go.dev/sync#Cond.Broadcast)推荐
+    >For many simple use cases, users will be better off using channels than a Cond (Broadcast corresponds to closing a channel, and Signal corresponds to sending on a channel).
+3. clerk那里给个prefer？防止重新探查leader？
+4. 考虑给kv一个本地的队列，维护收到的req，这样每次msg chan收到的东西拿来跟队列头比较一下时序就可以做到响应了，而不需要fan out
+   - 之前考虑过fan out，就是多个req同时监听一个chan，但想想似乎req有时序的，队列就可以
+   - 新想法，给kv一个map，维护(index,term)->chan

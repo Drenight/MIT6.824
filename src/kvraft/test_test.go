@@ -193,6 +193,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	}
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
+		// fmt.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -202,13 +203,16 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}()
 			last := ""
 			key := strconv.Itoa(cli)
+			// fmt.Printf("111\n")
 			Put(cfg, myck, key, last)
+			// fmt.Printf("222\n")
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
 					Append(cfg, myck, key, nv)
 					last = NextValue(last, nv)
+					// fmt.Printf("last? %+v\n", last)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
@@ -610,12 +614,10 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTestLinearizability(t, "3A", 15, 7, true, true, true, -1)
 }
 
-//
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
 // also checks that majority discards committed log entries
 // even if minority doesn't respond.
-//
 func TestSnapshotRPC3B(t *testing.T) {
 	const nservers = 3
 	maxraftstate := 1000

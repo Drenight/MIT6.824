@@ -37,15 +37,16 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
+	// fmt.Println("www1")
 	// You will have to modify this function.
 	args := GetArgs{key}
 	reply := GetReply{}
-	ok := false
+	// ok := false
 
 	for {
 		for _, srv := range ck.servers {
-			ok = srv.Call("KVServer.Get", &args, &reply)
-			if ok {
+			_ = srv.Call("KVServer.Get", &args, &reply)
+			if reply.Err == OK {
 				return reply.Value
 			}
 		}
@@ -62,16 +63,21 @@ func (ck *Clerk) Get(key string) string {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	// fmt.Printf("没错吧 key:%+v value:%+v op:%+v\n", key, value, op)
 	// You will have to modify this function.
 	args := PutAppendArgs{key, value, op}
 	reply := PutAppendReply{}
-	ok := false
+	// ok := false
+
+	// fmt.Printf("xxdd %+v\n", len(ck.servers))
 
 	for {
 		for _, srv := range ck.servers {
-			ok = srv.Call("KVServer.PutAppend", &args, &reply)
-			if ok {
-				break
+			_ = srv.Call("KVServer.PutAppend", &args, &reply)
+			if reply.Err == OK {
+				return
+			} else {
+				// fmt.Printf("shenmebdongj %+v\n", reply.Err)
 			}
 		}
 	}
