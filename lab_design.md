@@ -272,3 +272,10 @@ Unreliable那边的测试会爆问题
 2. 每台replica维护lastApply，client2requestID，filter掉redundant
 
 目前test3出了份log，明天继续调，现象是同一个log始终被报applied但是没成功被client ACK
+
+### 0616
+lab3A的测试全通过了！
+比较难调出来的点有下面几个
+- Duplicate的情况下设计成响应上次的结果，所以我把client->lastReqID改成了完整的client->lastOP
+- 同步修改下更新client->lastOP，不要仅在回复ok（handler仍然监听chan）的时候更新这个map，一旦needApply立刻更新
+- 注意op填充，get尤其

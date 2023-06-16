@@ -12,8 +12,8 @@ import (
 	"../raft"
 )
 
-const Debug = 1
-const TimeoutInterval = 500 * time.Millisecond
+const Debug = 0
+const TimeoutInterval = 1500 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -45,10 +45,11 @@ type KVServer struct {
 	// Your definitions here.
 	mp                     map[string]string
 	index2req              map[int]chan Op
-	cli2lastApplyRequestID map[int]int
+	cli2lastApplyRequestID map[int]Op
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	DPrintf("Receive Get, srv %+v, arg %+v\n", kv.me, args)
 	_, isleader := kv.rf.GetState()
 	if !isleader {
 		reply.Err = ErrWrongLeader
@@ -63,10 +64,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			args.ClientRequestID.ClientID,
 			args.ClientRequestID.RequestID,
 		},
-		"",
+		"None",
 	}
 	index, _, isLeader := kv.rf.Start(newOp)
 	if !isLeader {
+		DPrintf("Sus GET\n")
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -77,9 +79,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 	select {
 	case op := <-ch:
-		if op.Err != "" {
+		if op.Err != "None" {
 			// Error during apply
+			DPrintf("op'err is %+v\n", op.Err)
 			reply.Err = op.Err
+			reply.Value = op.Value
+			// fmt.Printf("reply value %+v\n", reply.Value)
 		} else if op.ClientRequestID.ClientID != args.ClientRequestID.ClientID {
 			// Apply successful, but not issued by this request, collision due to same index
 			reply.Err = ErrLeaderChange
@@ -97,6 +102,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	DPrintf("Receive PA, srv %+v, arg %+v\n", kv.me, args)
 	_, isleader := kv.rf.GetState()
 	if !isleader {
 		reply.Err = ErrWrongLeader
@@ -113,7 +119,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				args.ClientRequestID.ClientID,
 				args.ClientRequestID.RequestID,
 			},
-			"",
+			"None",
 		}
 	} else {
 		newOp = Op{
@@ -124,11 +130,16 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				args.ClientRequestID.ClientID,
 				args.ClientRequestID.RequestID,
 			},
-			"",
+			"None",
 		}
 	}
 	// fmt.Printf("PutAppend, newOP is %+v\n", newOp)
-	index, _, _ := kv.rf.Start(newOp)
+	index, _, isLeader := kv.rf.Start(newOp)
+	if !isLeader {
+		DPrintf("Sus PA\n")
+		reply.Err = ErrWrongLeader
+		return
+	}
 	// fmt.Printf("PutAppend, index: %+v, isLeader: %+v, newOp: %+v\n", index, isLeader, newOp)
 
 	kv.mu.Lock()
@@ -138,7 +149,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 	select {
 	case op := <-ch:
-		if op.Err != "" {
+		if op.Err != "None" {
 			// Error during apply
 			reply.Err = op.Err
 		} else if op.ClientRequestID.ClientID != args.ClientRequestID.ClientID {
@@ -167,24 +178,27 @@ func (kv *KVServer) bkgExecApply() {
 			kv.mu.Lock()
 
 			//Duplicate check, with the same client's last applied
-			lastID, notNew := kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID]
-			if notNew && lastID == op.ClientRequestID.RequestID {
+			last_op, notNew := kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID]
+			if notNew && last_op.ClientRequestID.RequestID == op.ClientRequestID.RequestID {
+				op = last_op //copy get result
 				op.Err = ErrDuplicate
 				ch, ok := kv.index2req[msg.CommandIndex]
-				DPrintf("Detect Duplicate, client %+v, req %+v\n", op.ClientRequestID.ClientID, op.ClientRequestID.RequestID)
+				DPrintf("Detect Duplicate, srv %+v, client %+v, req %+v\n", kv.me, op.ClientRequestID.ClientID, op.ClientRequestID.RequestID)
 				kv.mu.Unlock()
 				if ok {
 					ch <- op
 				}
 				continue
+			} else {
+				DPrintf("Start apply, srv %+v notNew %+v, last_op %+v, op %+v\n", kv.me, notNew, last_op, op)
 			}
 
 			if op.Op == "Get" {
 				val := kv.mp[op.Key]
+				op.Value = val
 				ch, ok := kv.index2req[msg.CommandIndex]
+				kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op
 				if ok {
-					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
-					op.Value = val
 					kv.mu.Unlock()
 					ch <- op
 				} else {
@@ -195,8 +209,8 @@ func (kv *KVServer) bkgExecApply() {
 			} else if op.Op == "Append" {
 				kv.mp[op.Key] += op.Value
 				ch, ok := kv.index2req[msg.CommandIndex]
+				kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op
 				if ok {
-					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
 					kv.mu.Unlock()
 					ch <- op
 				} else {
@@ -207,8 +221,8 @@ func (kv *KVServer) bkgExecApply() {
 			} else if op.Op == "Put" {
 				kv.mp[op.Key] = op.Value
 				ch, ok := kv.index2req[msg.CommandIndex]
+				kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op
 				if ok {
-					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
 					kv.mu.Unlock()
 					ch <- op
 				} else {
@@ -268,7 +282,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.index2req = make(map[int]chan Op)
 	kv.mp = make(map[string]string)
-	kv.cli2lastApplyRequestID = make(map[int]int)
+	kv.cli2lastApplyRequestID = make(map[int]Op)
 
 	// You may need initialization code here.
 
