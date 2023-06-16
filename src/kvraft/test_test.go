@@ -87,7 +87,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		}
 		off1 := strings.LastIndex(v, wanted)
 		if off1 != off {
-			t.Fatalf("duplicate element %v in Append result", wanted)
+			t.Fatalf("duplicate element %v in Append result. Result like \n%+v", wanted, v)
 		}
 		if off <= lastoff {
 			t.Fatalf("wrong order for element %v in Append result", wanted)
@@ -212,7 +212,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					// log.Printf("%d: client new append %v\n", cli, nv)
 					Append(cfg, myck, key, nv)
 					last = NextValue(last, nv)
-					// fmt.Printf("last? %+v\n", last)
+					// log.Printf("last? %+v\n", last)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)

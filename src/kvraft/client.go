@@ -3,6 +3,7 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"time"
 
 	"../labrpc"
 )
@@ -52,11 +53,14 @@ func (ck *Clerk) Get(key string) string {
 	// ok := false
 
 	for {
-		for _, srv := range ck.servers {
+		for index, srv := range ck.servers {
 			_ = srv.Call("KVServer.Get", &args, &reply)
-			if reply.Err == OK {
+			if reply.Err == OK || reply.Err == ErrDuplicate {
 				return reply.Value
+			} else {
+				DPrintf("%+v, len of srv %+v, srv %+v client %+v req %+v reply %+v\n", "Get", len(ck.servers), index, ck.ClientID, args.ClientRequestID.RequestID, reply)
 			}
+			time.Sleep(time.Millisecond * 10)
 		}
 	}
 
@@ -88,13 +92,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// fmt.Printf("xxdd %+v\n", len(ck.servers))
 
 	for {
-		for _, srv := range ck.servers {
+		for index, srv := range ck.servers {
 			_ = srv.Call("KVServer.PutAppend", &args, &reply)
-			if reply.Err == OK {
+			if reply.Err == OK || reply.Err == ErrDuplicate {
 				return
 			} else {
-				// fmt.Printf("shenmebdongj %+v\n", reply.Err)
+				DPrintf("%+v, len of srv %+v, srv %+v client %+v req %+v reply %+v\n", op, len(ck.servers), index, ck.ClientID, args.ClientRequestID.RequestID, reply)
 			}
+			time.Sleep(time.Millisecond * 10)
 		}
 	}
 }
