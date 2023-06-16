@@ -223,3 +223,52 @@ Unreliable那边的测试会爆问题
 4. 考虑给kv一个本地的队列，维护收到的req，这样每次msg chan收到的东西拿来跟队列头比较一下时序就可以做到响应了，而不需要fan out
    - 之前考虑过fan out，就是多个req同时监听一个chan，但想想似乎req有时序的，队列就可以
    - 新想法，给kv一个map，维护(index,term)->chan
+
+### 0610
+开始写3A with failures，面临的问题：
+1. clerk在收到success回复前可能发多次RPC，需要保证这些RPC不会引发多次的执行
+   - 例如：一个leader commit了一个entry，然后立刻挂掉，导致这个commit没有response
+   - 这个似乎需要复习下：raft怎么处理低term的entry？不让commit吗？
+     - >Raft never commits log entries from previous terms by counting replicas
+     - >The restriction ensures that the leader for any given term contains all of the entries committed in previous terms
+  - 其实不止这种（没响应），还譬如leader更替了，不能还以为自己是leader响应个success
+    - 这个真的有问题吗？srv感知到leader更替了，肯定是没阻塞在监听chan啊，那要么成了要么没成呗
+    - >For example, you may have been the leader when the client initially contacted you, but someone else has since been elected, and the client request you put in the log has been discarded. Clearly you need to have the client try again, but how do you know when to tell them about the error?
+      - 参考了TA的student guide，似乎只是个不严重的问题，无非就是优化掉超时和让client感知到新leader？
+
+作业的提示：
+1. 让server发现自己不是leader：
+   1. 相同index出现了别的request
+   2. 系统term变更了
+2. clerk加个prefer server，加速，上面提过
+3. unique id每个RPC，来取得执行仅一次
+    - 在哪落地检测呢？ 
+4. duplicate检测，要尽量快速释放服务器的内存
+    - >Your scheme for duplicate detection should free server memory quickly, for example by having each RPC imply that the client has seen the reply for its previous RPC. It's OK to assume that a client will make only one call into a Clerk at a time.
+
+有个想法
+- 每个client维护一个递增的请求号，在收到commit的时候增
+  - 似乎可以直接用个uuid？不会有4,5,6需要用到4的？
+    - 感觉可行，不去拒绝apply，而是响应新请求，既然现在请求是用clientID找的？
+    - 这样所有机器都一致地执行log，特定接到req的机器拒绝start新请求就行
+      - 这个拒绝有点时序问题？或者还是所有机器记录每个client最后apply的req
+- server维护一个map，client->apply过的最大请求号
+
+担心的点
+- replay咋办呢？这台server挂掉的话
+  - 不是不行吧，重跑整个log继续维护最大请求号？snapshot有点担心
+- client挂了咋办，不让挂？每次写磁盘？
+  - 会不会有种实现就是让客户端的请求为-1的时候表示一定接受啊？
+
+用logIndex标识请求，apply相应chan的问题
+- 这台机器start了，开始监听那个chan
+- 这台机器lose leader，被覆盖log，新leader在那个log位置写了个别人的request
+- 这台机器的apply线程发现那个log位置的map里有个老chan，往里写
+- **这台机器会响应一个别人的response给原client**
+
+### 0615
+0610的问题应该想清楚了
+1. 还是index2chan，这样可以select同index非同client的时候响应leaderChange
+2. 每台replica维护lastApply，client2requestID，filter掉redundant
+
+目前test3出了份log，明天继续调，现象是同一个log始终被报applied但是没成功被client ACK

@@ -12,7 +12,7 @@ import (
 	"../raft"
 )
 
-const Debug = 0
+const Debug = 1
 const TimeoutInterval = 500 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -26,9 +26,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Op    string
-	Key   string
-	Value string
+	Op              string
+	Key             string
+	Value           string
+	ClientRequestID ClientRequestID
+	Err             Err
 }
 
 type KVServer struct {
@@ -41,8 +43,9 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	mp        map[string]string
-	index2req map[int]chan string
+	mp                     map[string]string
+	index2req              map[int]chan Op
+	cli2lastApplyRequestID map[int]int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -56,6 +59,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		"Get",
 		args.Key,
 		"",
+		ClientRequestID{
+			args.ClientRequestID.ClientID,
+			args.ClientRequestID.RequestID,
+		},
+		"",
 	}
 	index, _, isLeader := kv.rf.Start(newOp)
 	if !isLeader {
@@ -64,16 +72,26 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	kv.index2req[index] = make(chan string)
+	kv.index2req[index] = make(chan Op)
+	ch := kv.index2req[index]
 	kv.mu.Unlock()
 	select {
-	case res := <-kv.index2req[index]:
-		reply.Err = OK
-		reply.Value = res
+	case op := <-ch:
+		if op.Err != "" {
+			// Error during apply
+			reply.Err = op.Err
+		} else if op.ClientRequestID.ClientID != args.ClientRequestID.ClientID {
+			// Apply successful, but not issued by this request, collision due to same index
+			reply.Err = ErrLeaderChange
+		} else {
+			reply.Err = OK
+			reply.Value = op.Value
+		}
 	case <-time.After(TimeoutInterval):
 		reply.Err = ErrTimeOut
 	}
 	kv.mu.Lock()
+
 	close(kv.index2req[index])
 	delete(kv.index2req, index)
 }
@@ -91,12 +109,22 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			"Put",
 			args.Key,
 			args.Value,
+			ClientRequestID{
+				args.ClientRequestID.ClientID,
+				args.ClientRequestID.RequestID,
+			},
+			"",
 		}
 	} else {
 		newOp = Op{
 			"Append",
 			args.Key,
 			args.Value,
+			ClientRequestID{
+				args.ClientRequestID.ClientID,
+				args.ClientRequestID.RequestID,
+			},
+			"",
 		}
 	}
 	// fmt.Printf("PutAppend, newOP is %+v\n", newOp)
@@ -105,11 +133,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	kv.index2req[index] = make(chan string)
+	kv.index2req[index] = make(chan Op)
+	ch := kv.index2req[index]
 	kv.mu.Unlock()
 	select {
-	case <-kv.index2req[index]:
-		reply.Err = OK
+	case op := <-ch:
+		if op.Err != "" {
+			// Error during apply
+			reply.Err = op.Err
+		} else if op.ClientRequestID.ClientID != args.ClientRequestID.ClientID {
+			// Apply successful, but not issued by this request, collision due to same index
+			reply.Err = ErrLeaderChange
+		} else {
+			reply.Err = OK
+		}
 	case <-time.After(TimeoutInterval):
 		reply.Err = ErrTimeOut
 	}
@@ -126,31 +163,57 @@ func (kv *KVServer) bkgExecApply() {
 		if msg.CommandValid {
 			// fmt.Printf("Apply!! %+v\n", msg)
 			op := msg.Command.(Op)
-			if op.Op == "Get" {
-				kv.mu.Lock()
-				val := kv.mp[op.Key]
+
+			kv.mu.Lock()
+
+			//Duplicate check, with the same client's last applied
+			lastID, notNew := kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID]
+			if notNew && lastID == op.ClientRequestID.RequestID {
+				op.Err = ErrDuplicate
+				ch, ok := kv.index2req[msg.CommandIndex]
+				DPrintf("Detect Duplicate, client %+v, req %+v\n", op.ClientRequestID.ClientID, op.ClientRequestID.RequestID)
 				kv.mu.Unlock()
+				if ok {
+					ch <- op
+				}
+				continue
+			}
+
+			if op.Op == "Get" {
+				val := kv.mp[op.Key]
 				ch, ok := kv.index2req[msg.CommandIndex]
 				if ok {
-					ch <- val
+					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
+					op.Value = val
+					kv.mu.Unlock()
+					ch <- op
+				} else {
+					kv.mu.Unlock()
+					// DPrintf("Closed Channel, maybe due to timeout\n")
 				}
 				// kv.index2req[msg.CommandIndex] <- val
 			} else if op.Op == "Append" {
-				kv.mu.Lock()
 				kv.mp[op.Key] += op.Value
-				kv.mu.Unlock()
 				ch, ok := kv.index2req[msg.CommandIndex]
 				if ok {
-					ch <- ""
+					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
+					kv.mu.Unlock()
+					ch <- op
+				} else {
+					kv.mu.Unlock()
+					// DPrintf("Closed Channel, maybe due to timeout\n")
 				}
 				// kv.index2req[msg.CommandIndex] <- ""
 			} else if op.Op == "Put" {
-				kv.mu.Lock()
 				kv.mp[op.Key] = op.Value
-				kv.mu.Unlock()
 				ch, ok := kv.index2req[msg.CommandIndex]
 				if ok {
-					ch <- ""
+					kv.cli2lastApplyRequestID[op.ClientRequestID.ClientID] = op.ClientRequestID.RequestID
+					kv.mu.Unlock()
+					ch <- op
+				} else {
+					kv.mu.Unlock()
+					// DPrintf("Closed Channel, maybe due to timeout\n")
 				}
 			} else {
 				fmt.Printf("?????\n")
@@ -203,8 +266,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.index2req = make(map[int]chan string)
+	kv.index2req = make(map[int]chan Op)
 	kv.mp = make(map[string]string)
+	kv.cli2lastApplyRequestID = make(map[int]int)
 
 	// You may need initialization code here.
 

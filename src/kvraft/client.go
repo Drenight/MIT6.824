@@ -8,7 +8,8 @@ import (
 )
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers  []*labrpc.ClientEnd
+	ClientID int
 	// You will have to modify this struct.
 }
 
@@ -22,6 +23,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.ClientID = int(nrand())
 	// You'll have to add code here.
 	return ck
 }
@@ -39,7 +41,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// fmt.Println("www1")
 	// You will have to modify this function.
-	args := GetArgs{key}
+	args := GetArgs{
+		ClientRequestID{
+			ck.ClientID,
+			int(nrand()),
+		},
+		key,
+	}
 	reply := GetReply{}
 	// ok := false
 
@@ -65,7 +73,15 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// fmt.Printf("没错吧 key:%+v value:%+v op:%+v\n", key, value, op)
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
+	args := PutAppendArgs{
+		ClientRequestID{
+			ck.ClientID,
+			int(nrand()),
+		},
+		key,
+		value,
+		op,
+	}
 	reply := PutAppendReply{}
 	// ok := false
 
